@@ -1,0 +1,9 @@
+.env
+.git
+downloads
+data
+chrome-profile
+debug
+__pycache__
+*.pyc
+.venv

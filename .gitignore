@@ -2,6 +2,7 @@
 /canva/
 **/__pycache__/
 *.py[cod]
+server/.venv/
 
 # Local secrets and runtime state
 .env

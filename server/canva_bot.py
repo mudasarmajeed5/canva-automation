@@ -219,6 +219,12 @@ def _browser() -> BrowserContext:
                 # uses the GNOME keyring and Playwright cannot decrypt the
                 # login cookies -> Canva appears logged out on every launch.
                 "--password-store=basic",
+                *(
+                    ["--no-sandbox"]
+                    if os.getenv("CANVA_CHROMIUM_NO_SANDBOX", "").strip().lower()
+                    in {"1", "true", "yes", "on"}
+                    else []
+                ),
             ],
         )
         yield context

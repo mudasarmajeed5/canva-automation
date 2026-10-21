@@ -134,7 +134,7 @@ class RowIn(BaseModel):
     task_type: str
     task_description: str = Field(min_length=1, max_length=500)
     status: str = DEFAULT_STATUS
-    canva_link: str
+    canva_link: str = ""
 
     @field_validator("account")
     @classmethod
@@ -167,6 +167,8 @@ class RowIn(BaseModel):
     @field_validator("canva_link")
     @classmethod
     def _check_canva_link(cls, value: str) -> str:
+        if not value:
+            return ""
         if not is_valid_canva_link(value):
             raise ValueError(
                 "canva_link must be an https link on canva.com, www.canva.com or canva.link"
@@ -211,3 +213,116 @@ class JobRequest(BaseModel):
         if duplicates:
             raise ValueError(f"row_id must be unique; repeated: {', '.join(sorted(duplicates))}")
         return self
+
+
+# --- Sheet row management models ----------------------------------------------
+
+
+class SheetRow(BaseModel):
+    row_number: int
+    date: str
+    account: str
+    task_type: str
+    task_description: str
+    status: str
+    post_link: str
+
+
+class RowUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    row_number: int = Field(ge=2)
+    account: str | None = None
+    task_type: str | None = None
+    task_description: str | None = None
+    status: str | None = None
+
+    @field_validator("account")
+    @classmethod
+    def _check_account(cls, value: str | None) -> str | None:
+        if value is not None and value not in ACCOUNTS:
+            raise ValueError(f"account must be one of: {', '.join(ACCOUNTS)}")
+        return value
+
+    @field_validator("task_type")
+    @classmethod
+    def _check_task_type(cls, value: str | None) -> str | None:
+        if value is not None and value not in TASK_TYPES:
+            raise ValueError(f"task_type must be one of: {', '.join(TASK_TYPES)}")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def _check_status(cls, value: str | None) -> str | None:
+        if value is not None and value not in STATUSES:
+            raise ValueError(f"status must be one of: {', '.join(STATUSES)}")
+        return value
+
+
+class CreateRowsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    google_access_token: str = Field(min_length=10)
+    date: str
+    rows: list[RowIn] = Field(min_length=1)
+
+    @field_validator("date")
+    @classmethod
+    def _check_date(cls, value: str) -> str:
+        if not is_valid_sheet_date(value):
+            raise ValueError("date must use the D-MMM-YYYY format, e.g. 21-Oct-2026")
+        return value.strip()
+
+
+class UpdateRowsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    google_access_token: str = Field(min_length=10)
+    updates: list[RowUpdate] = Field(min_length=1)
+
+
+class DownloadItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    row_number: int = Field(ge=2)
+    account: str
+    task_type: str
+    canva_link: str
+
+    @field_validator("account")
+    @classmethod
+    def _check_account(cls, value: str) -> str:
+        if value not in ACCOUNTS:
+            raise ValueError(f"account must be one of: {', '.join(ACCOUNTS)}")
+        return value
+
+    @field_validator("task_type")
+    @classmethod
+    def _check_task_type(cls, value: str) -> str:
+        if value not in TASK_TYPES:
+            raise ValueError(f"task_type must be one of: {', '.join(TASK_TYPES)}")
+        return value
+
+    @field_validator("canva_link")
+    @classmethod
+    def _check_canva_link(cls, value: str) -> str:
+        if not is_valid_canva_link(value):
+            raise ValueError(
+                "canva_link must be an https link on canva.com, www.canva.com or canva.link"
+            )
+        return value.strip()
+
+
+class DownloadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    google_access_token: str = Field(min_length=10)
+    date: str
+    rows: list[DownloadItem] = Field(min_length=1)
+
+    @field_validator("date")
+    @classmethod
+    def _check_date(cls, value: str) -> str:
+        if not is_valid_sheet_date(value):
+            raise ValueError("date must use the D-MMM-YYYY format, e.g. 21-Oct-2026")
+        return value.strip()

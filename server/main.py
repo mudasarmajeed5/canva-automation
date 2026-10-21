@@ -27,7 +27,14 @@ import cleanup
 import sheets
 from config import BASE_DIR, Settings, get_settings
 from jobs import JobStore, forget_all_tokens, new_job_id, remember_token
-from models import AutomationError, JobRequest
+from models import (
+    AutomationError,
+    CreateRowsRequest,
+    DownloadRequest,
+    JobRequest,
+    RowInput,
+    UpdateRowsRequest,
+)
 from worker import Worker
 
 log = logging.getLogger(__name__)
@@ -329,4 +336,113 @@ async def get_job(job_id: str, request: Request, _: None = Depends(require_secre
                 for row in job["rows"]
             ],
         },
+    )
+
+
+# --- Sheet row management endpoints -------------------------------------------
+
+
+@app.get("/api/sheet-rows")
+async def get_sheet_rows(
+    date: str,
+    token: str,
+    _: None = Depends(require_secret),
+) -> JSONResponse:
+    try:
+        rows = await asyncio.to_thread(sheets.read_rows, token, date)
+    except AutomationError as exc:
+        return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
+    except Exception:
+        log.exception("sheet read failed")
+        return JSONResponse(
+            status_code=502,
+            content={"error": "SHEET_API_FAILED", "message": "Could not read the Sheet."},
+        )
+    return JSONResponse(status_code=200, content={"rows": rows})
+
+
+@app.post("/api/sheet-rows")
+async def create_sheet_rows(
+    payload: CreateRowsRequest,
+    _: None = Depends(require_secret),
+) -> JSONResponse:
+    rows = [row.to_row_input() for row in payload.rows]
+    try:
+        sheet_rows = await asyncio.to_thread(
+            sheets.create_rows, payload.google_access_token, payload.date, rows
+        )
+    except AutomationError as exc:
+        return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
+    except Exception:
+        log.exception("sheet create rows failed")
+        return JSONResponse(
+            status_code=502,
+            content={"error": "SHEET_APPEND_FAILED", "message": "Could not write the rows to Sheets."},
+        )
+    return JSONResponse(
+        status_code=201,
+        content={"rows_written": len(rows), "row_numbers": sheet_rows},
+    )
+
+
+@app.patch("/api/sheet-rows")
+async def patch_sheet_rows(
+    payload: UpdateRowsRequest,
+    _: None = Depends(require_secret),
+) -> JSONResponse:
+    updates = [u.model_dump(exclude_none=True) for u in payload.updates]
+    try:
+        await asyncio.to_thread(sheets.update_rows, payload.google_access_token, updates)
+    except AutomationError as exc:
+        return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
+    except Exception:
+        log.exception("sheet update rows failed")
+        return JSONResponse(
+            status_code=502,
+            content={"error": "SHEET_API_FAILED", "message": "Could not update the Sheet."},
+        )
+    return JSONResponse(status_code=200, content={"updated": len(updates)})
+
+
+@app.post("/api/download")
+async def queue_download(
+    payload: DownloadRequest,
+    request: Request,
+    _: None = Depends(require_secret),
+) -> JSONResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limiter.allow(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"error": "rate_limited", "message": "Too many requests; try again in a minute."},
+        )
+
+    store: JobStore = request.app.state.store
+    worker: Worker = request.app.state.worker
+
+    rows: list[RowInput] = []
+    sheet_rows: dict[str, int] = {}
+    for index, item in enumerate(payload.rows):
+        row_id = f"dl_{index}_{item.row_number}"
+        rows.append(
+            RowInput(
+                row_id=row_id,
+                account=item.account,
+                task_type=item.task_type,
+                task_description="",
+                status="Done",
+                canva_link=item.canva_link,
+            )
+        )
+        sheet_rows[row_id] = item.row_number
+
+    job_id = new_job_id()
+    store.create_job(job_id, payload.date, None, rows, sheet_rows)
+    remember_token(job_id, payload.google_access_token)
+    worker.enqueue(job_id)
+
+    log.info("queued download job %s with %s row(s)", job_id, len(rows))
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "state": "queued", "rows_queued": len(rows)},
     )

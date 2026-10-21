@@ -94,6 +94,13 @@ async def _process_row(
 ) -> None:
     row_id = row["row_id"]
 
+    # Skip rows that already have a Drive link in Post Link.
+    existing_link = row.get("post_link") or row.get("drive_url") or ""
+    if existing_link.strip():
+        store.set_row_state(job_id, row_id, "done", drive_url=existing_link.strip())
+        log.info("row %s already has a Post Link; skipping download", row_id)
+        return
+
     store.set_row_state(job_id, row_id, "downloading")
     downloaded = await asyncio.to_thread(
         canva_bot.download_design, row["canva_link"], job_dir
@@ -127,10 +134,9 @@ async def _process_row(
         )
 
     await asyncio.to_thread(
-        sheets.set_post_link,
+        sheets.set_drive_link,
         token,
         int(row["sheet_row"]),
-        row["canva_link"],
         upload.web_view_link,
     )
 

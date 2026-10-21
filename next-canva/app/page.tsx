@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, Suspense, useEffect, useMemo, useState } from "react";
+import { FormEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 const ACCOUNTS = [
@@ -18,24 +18,34 @@ const TASK_TYPES = [
 
 const STATUSES = ["Done", "In Progress", "Completed"] as const;
 
+type SheetRow = {
+  row_number: number;
+  date: string;
+  account: string;
+  task_type: string;
+  task_description: string;
+  status: string;
+  post_link: string;
+};
+
+type NewEntry = {
+  account: string;
+  task_type: string;
+  task_description: string;
+  status: string;
+};
+
 type Job = {
   job_id: string;
   state: string;
   rows: Array<{
     row_id: string;
+    sheet_row: number | null;
     state: string;
     file: string | null;
     drive_url: string | null;
     error: string | null;
   }>;
-};
-
-type Entry = {
-  account: string;
-  taskType: (typeof TASK_TYPES)[number];
-  status: (typeof STATUSES)[number];
-  description: string;
-  link: string;
 };
 
 function today() {
@@ -48,136 +58,242 @@ function today() {
     .replace(/ /g, "-");
 }
 
+function defaultNewEntry(): NewEntry {
+  return {
+    account: ACCOUNTS[0][1],
+    task_type: TASK_TYPES[0],
+    task_description: "",
+    status: "Done",
+  };
+}
+
 function HomeContent() {
   const searchParams = useSearchParams();
   const [date, setDate] = useState(today);
-  const [entries, setEntries] = useState<Entry[]>([{
-    account: ACCOUNTS[0][1],
-    taskType: TASK_TYPES[0],
-    status: "Done",
-    description: "",
-    link: "",
-  }]);
   const [token, setToken] = useState("");
+  const [oauthToken, setOauthToken] = useState("");
+  const [oauthEmail, setOauthEmail] = useState("");
+  const [rows, setRows] = useState<SheetRow[]>([]);
+  const [newEntries, setNewEntries] = useState<NewEntry[]>([defaultNewEntry()]);
+  const [canvaLinks, setCanvaLinks] = useState<Record<number, string>>({});
+  const [dirtyRows, setDirtyRows] = useState<Set<number>>(new Set());
   const [job, setJob] = useState<Job | null>(null);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [downloadingRow, setDownloadingRow] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
   const [automationOnline, setAutomationOnline] = useState<boolean | null>(null);
-  const oauthToken = searchParams.get("token") ?? "";
-  const oauthEmail = searchParams.get("email") ?? "";
+  const fetchedRef = useRef(false);
+
   const oauthError = searchParams.get("error") ?? "";
   const activeToken = token || oauthToken;
   const activeEmail = oauthEmail;
-  const initialMessage = activeToken && !message && !oauthError
-    ? "Google is connected. The access token is ready for this session."
-    : message;
 
   useEffect(() => {
+    const t = searchParams.get("token");
+    const e = searchParams.get("email");
+    if (t) setOauthToken(t);
+    if (e) setOauthEmail(e);
     if (window.location.search) window.history.replaceState({}, "", "/");
-  }, []);
+  }, [searchParams]);
 
   useEffect(() => {
     let mounted = true;
     fetch("/api/automation-health")
-      .then((response) => response.json())
+      .then((r) => r.json())
       .then((body) => mounted && setAutomationOnline(body.online === true))
       .catch(() => mounted && setAutomationOnline(false));
     return () => { mounted = false; };
   }, []);
 
-  useEffect(() => {
-    if (!job || ["done", "done_with_errors", "failed"].includes(job.state)) {
-      return;
+  const fetchRows = useCallback(async () => {
+    if (!activeToken || !date) return;
+    setLoadingRows(true);
+    setError("");
+    try {
+      const params = new URLSearchParams({ date, token: activeToken });
+      const response = await fetch(`/api/sheet-rows?${params}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message || body.error || "Could not load rows.");
+      setRows(body.rows || []);
+      setDirtyRows(new Set());
+      const links: Record<number, string> = {};
+      for (const row of body.rows || []) {
+        if (!row.post_link) links[row.row_number] = "";
+      }
+      setCanvaLinks((prev) => ({ ...links, ...prev }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load rows.");
+    } finally {
+      setLoadingRows(false);
     }
+  }, [activeToken, date]);
+
+  useEffect(() => {
+    if (!activeToken || fetchedRef.current) return;
+    fetchedRef.current = true;
+    fetchRows();
+  }, [activeToken, fetchRows]);
+
+  useEffect(() => {
+    if (!job || ["done", "done_with_errors", "failed"].includes(job.state)) return;
     const timer = window.setInterval(async () => {
       const response = await fetch(`/api/jobs/${job.job_id}`);
-      if (response.ok) setJob(await response.json());
+      if (response.ok) {
+        const updated = await response.json();
+        setJob(updated);
+        if (["done", "done_with_errors", "failed"].includes(updated.state)) {
+          fetchRows();
+        }
+      }
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [job]);
+  }, [job, fetchRows]);
 
-  const completedEntries = useMemo(
-    () => entries.filter((entry) => entry.link.trim()),
-    [entries],
-  );
-  const finishedRows = job?.rows.filter((row) => row.state === "done").length ?? 0;
+  const dirtyCount = dirtyRows.size;
+  const activeJobRows = job?.rows.filter((r) => r.state !== "done" && r.state !== "failed").length ?? 0;
+  const finishedRows = job?.rows.filter((r) => r.state === "done").length ?? 0;
 
-  function updateEntry(index: number, patch: Partial<Entry>) {
-    setEntries((current) => current.map((entry, i) => (
-      i === index ? { ...entry, ...patch } : entry
-    )));
+  function updateNewEntry(index: number, patch: Partial<NewEntry>) {
+    setNewEntries((cur) => cur.map((e, i) => (i === index ? { ...e, ...patch } : e)));
   }
 
-  function addEntry() {
-    const previous = entries[entries.length - 1];
-    setEntries((current) => [...current, {
-      account: ACCOUNTS[0][1],
-      taskType: previous.taskType,
-      status: previous.status,
-      description: previous.description,
-      link: "",
-    }]);
+  function addNewEntry() {
+    setNewEntries((cur) => [...cur, defaultNewEntry()]);
   }
 
-  function removeEntry(index: number) {
-    setEntries((current) =>
-      current.length === 1 ? current : current.filter((_, i) => i !== index),
+  function removeNewEntry(index: number) {
+    setNewEntries((cur) => (cur.length === 1 ? cur : cur.filter((_, i) => i !== index)));
+  }
+
+  function updateRow(rowNumber: number, field: keyof SheetRow, value: string) {
+    setRows((cur) =>
+      cur.map((r) => (r.row_number === rowNumber ? { ...r, [field]: value } : r)),
     );
+    setDirtyRows((cur) => new Set(cur).add(rowNumber));
   }
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
+  function updateCanvaLink(rowNumber: number, value: string) {
+    setCanvaLinks((cur) => ({ ...cur, [rowNumber]: value }));
+  }
+
+  async function handleAdd(event: FormEvent) {
     event.preventDefault();
     setError("");
     setMessage("");
     if (!activeToken.trim()) {
-      setError("Connect Google first, or paste a Google access token below.");
+      setError("Connect Google first.");
       return;
     }
-
-    if (!completedEntries.length) {
-      setError("Add at least one task with a Canva link.");
+    const valid = newEntries.filter((e) => e.task_description.trim());
+    if (!valid.length) {
+      setError("Add a description for at least one task.");
       return;
     }
-    if (completedEntries.some((entry) => !entry.description.trim())) {
-      setError("Complete the description for every task that has a Canva link.");
-      return;
-    }
-    if (automationOnline === false) {
-      setError("The automation server is offline. Nothing was written. Try again later.");
-      return;
-    }
-
-    setSubmitting(true);
+    setAdding(true);
     try {
-      const response = await fetch("/api/jobs", {
+      const response = await fetch("/api/sheet-rows", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          request_type: "CANVA_AUTOMATION",
-          date,
           google_access_token: activeToken.trim(),
-          requested_by: activeEmail.trim() || undefined,
-          rows: completedEntries.map((entry) => ({
+          date,
+          rows: valid.map((entry, i) => ({
             row_id: crypto.randomUUID(),
             account: entry.account,
-            task_type: entry.taskType,
-            task_description: entry.description.trim(),
+            task_type: entry.task_type,
+            task_description: entry.task_description.trim(),
             status: entry.status,
-            canva_link: entry.link.trim(),
+            canva_link: "",
           })),
         }),
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.message || body.error || "Could not queue the job.");
-      setJob(body);
-      setMessage(`Queued ${body.rows_written} design${body.rows_written === 1 ? "" : "s"}.`);
-    } catch (submissionError) {
-      setError(submissionError instanceof Error ? submissionError.message : "Could not queue the job.");
+      if (!response.ok) throw new Error(body.message || body.error || "Could not add rows.");
+      setMessage(`Added ${body.rows_written} task${body.rows_written === 1 ? "" : "s"} to Sheet.`);
+      setNewEntries([defaultNewEntry()]);
+      await fetchRows();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add rows.");
     } finally {
-      setSubmitting(false);
+      setAdding(false);
     }
   }
+
+  async function handleSync() {
+    if (!dirtyCount || !activeToken.trim()) return;
+    setError("");
+    setMessage("");
+    setSyncing(true);
+    try {
+      const updates = Array.from(dirtyRows).map((rowNumber) => {
+        const row = rows.find((r) => r.row_number === rowNumber)!;
+        return {
+          row_number: rowNumber,
+          account: row.account,
+          task_type: row.task_type,
+          task_description: row.task_description,
+          status: row.status,
+        };
+      });
+      const response = await fetch("/api/sheet-rows", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ google_access_token: activeToken.trim(), updates }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message || body.error || "Could not sync.");
+      setMessage(`Synced ${body.updated} row${body.updated === 1 ? "" : "s"} to Sheet.`);
+      setDirtyRows(new Set());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not sync.");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function handleDownload(rowNumber: number) {
+    const row = rows.find((r) => r.row_number === rowNumber);
+    const canvaLink = canvaLinks[rowNumber]?.trim();
+    if (!row || !canvaLink || !activeToken.trim()) return;
+    setError("");
+    setMessage("");
+    setDownloadingRow(rowNumber);
+    try {
+      const response = await fetch("/api/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          google_access_token: activeToken.trim(),
+          date,
+          rows: [
+            {
+              row_number: rowNumber,
+              account: row.account,
+              task_type: row.task_type,
+              canva_link: canvaLink,
+            },
+          ],
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.message || body.error || "Could not queue download.");
+      setJob(body);
+      setMessage(`Download queued for row ${rowNumber}. Watch the VNC screen.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not queue download.");
+    } finally {
+      setDownloadingRow(null);
+    }
+  }
+
+  const initialMessage = useMemo(() => {
+    if (oauthError) return "";
+    if (activeToken && !message) return "Google is connected. The access token is ready for this session.";
+    return message;
+  }, [activeToken, message, oauthError]);
 
   return (
     <main className="shell">
@@ -186,7 +302,7 @@ function HomeContent() {
           <p className="eyebrow">CANVA → DRIVE / CONTROL DESK</p>
           <h1>Move the work,<br /><em>not the links.</em></h1>
           <p className="intro">
-            Queue finished designs for download, Drive delivery, and a clean calendar update.
+            Add tasks, sync to Sheet, then paste Canva links to download and deliver to Drive.
           </p>
         </div>
         <div className={`status-pill ${automationOnline ? "is-ready" : ""}`}>
@@ -197,8 +313,8 @@ function HomeContent() {
 
       <div className="rule" />
 
-      <section className="workspace">
-        <form className="card intake-card" onSubmit={submit}>
+      <div className="workspace">
+        <div className="card intake-card">
           <div className="card-heading">
             <div>
               <p className="section-label">New delivery</p>
@@ -209,75 +325,81 @@ function HomeContent() {
 
           <label className="date-field">
             Calendar date
-            <input value={date} onChange={(event) => setDate(event.target.value)} placeholder="21-Oct-2026" required />
-            <small>This date applies to every task below.</small>
+            <input value={date} onChange={(e) => setDate(e.target.value)} placeholder="21-Oct-2026" required />
+            <small>Tasks are added to and loaded from the Sheet for this date.</small>
           </label>
 
-          <div className="links-heading">
-            <div>
-              <p className="section-label">Task entries</p>
-              <p className="muted">Each row is one Sheet entry. Add the Canva link when that design is ready.</p>
-            </div>
-            <span className="count">{entries.length} {entries.length === 1 ? "task" : "tasks"}</span>
-          </div>
-
-          <div className="entry-list">
-            {entries.map((entry, index) => (
-              <div className="entry-row" key={index}>
-                <span className="row-number">{String(index + 1).padStart(2, "0")}</span>
-                <div className="entry-fields">
-                  <div className="entry-selects">
-                    <label>Business
-                      <select value={entry.account} onChange={(event) => updateEntry(index, { account: event.target.value })}>
-                        {ACCOUNTS.map(([label, value]) => <option value={value} key={value}>{label}</option>)}
-                      </select>
-                    </label>
-                    <label>Content type
-                      <select value={entry.taskType} onChange={(event) => updateEntry(index, { taskType: event.target.value as Entry["taskType"] })}>
-                        {TASK_TYPES.map((value) => <option value={value} key={value}>{value}</option>)}
-                      </select>
-                    </label>
-                    <label>Status
-                      <select value={entry.status} onChange={(event) => updateEntry(index, { status: event.target.value as Entry["status"] })}>
-                        {STATUSES.map((value) => <option value={value} key={value}>{value}</option>)}
-                      </select>
-                    </label>
-                  </div>
-                  <input value={entry.description} onChange={(event) => updateEntry(index, { description: event.target.value })} placeholder="Reel for Friday for 16-Oct-2026" aria-label={`Task description ${index + 1}`} />
-                  <input value={entry.link} onChange={(event) => updateEntry(index, { link: event.target.value })} placeholder="Paste Canva link when ready…" type="url" aria-label={`Canva link ${index + 1}`} />
-                </div>
-                <button type="button" className="icon-button" onClick={() => removeEntry(index)} aria-label={`Remove task ${index + 1}`}>×</button>
+          <form onSubmit={handleAdd}>
+            <div className="links-heading">
+              <div>
+                <p className="section-label">New task entries</p>
+                <p className="muted">Fill in the details, then click &quot;Add to Sheet&quot;.</p>
               </div>
-            ))}
-          </div>
-          <button type="button" className="add-link" onClick={addEntry}>＋ Add another task</button>
-
-          <div className="submit-row">
-            <div className="submit-note">
-              <span className="lock-icon">↗</span>
-              <span>Links are written to Sheets first.<br />Drive replaces them after verification.</span>
+              <span className="count">{newEntries.length} {newEntries.length === 1 ? "task" : "tasks"}</span>
             </div>
-            <button className="primary-button" disabled={submitting}>
-              {submitting ? "Queuing…" : "Upload ready tasks"} <span>→</span>
-            </button>
-          </div>
-        </form>
+
+            <div className="entry-list">
+              {newEntries.map((entry, index) => (
+                <div className="entry-row" key={index}>
+                  <span className="row-number">{String(index + 1).padStart(2, "0")}</span>
+                  <div className="entry-fields">
+                    <div className="entry-selects">
+                      <label>Business
+                        <select value={entry.account} onChange={(e) => updateNewEntry(index, { account: e.target.value })}>
+                          {ACCOUNTS.map(([label, value]) => <option value={value} key={value}>{label}</option>)}
+                        </select>
+                      </label>
+                      <label>Content type
+                        <select value={entry.task_type} onChange={(e) => updateNewEntry(index, { task_type: e.target.value })}>
+                          {TASK_TYPES.map((v) => <option value={v} key={v}>{v}</option>)}
+                        </select>
+                      </label>
+                      <label>Status
+                        <select value={entry.status} onChange={(e) => updateNewEntry(index, { status: e.target.value })}>
+                          {STATUSES.map((v) => <option value={v} key={v}>{v}</option>)}
+                        </select>
+                      </label>
+                    </div>
+                    <input
+                      value={entry.task_description}
+                      onChange={(e) => updateNewEntry(index, { task_description: e.target.value })}
+                      placeholder="Reel for Friday for 16-Oct-2026"
+                      aria-label={`Task description ${index + 1}`}
+                    />
+                  </div>
+                  <button type="button" className="icon-button" onClick={() => removeNewEntry(index)} aria-label={`Remove task ${index + 1}`}>×</button>
+                </div>
+              ))}
+            </div>
+            <button type="button" className="add-link" onClick={addNewEntry}>＋ Add another task</button>
+
+            <div className="submit-row">
+              <div className="submit-note">
+                <span className="lock-icon">↗</span>
+                <span>Rows are added to Sheet with an empty Post Link.<br />Paste Canva links below to download.</span>
+              </div>
+              <button className="primary-button" disabled={adding}>
+                {adding ? "Adding…" : "Add to Sheet"} <span>→</span>
+              </button>
+            </div>
+          </form>
+        </div>
 
         <aside className="side-column">
           <section className="card connect-card">
             <div className="card-heading compact">
               <div><p className="section-label">Access</p><h2>Connect Google</h2></div>
-              <span className="google-g">G</span>
+              <span className="google-button">G</span>
             </div>
             <p className="muted">Authorize Sheets and Drive, then use the token for this session only.</p>
             <a className="google-button" href="/api/auth/google">Continue with Google <span>↗</span></a>
             <label className="token-label">
               Access token
-              <textarea value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste token here if you already have one" rows={3} spellCheck={false} />
+              <textarea value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste token here if you already have one" rows={3} spellCheck={false} />
             </label>
             {activeEmail && <p className="connected-as">Connected as <strong>{activeEmail}</strong></p>}
             <p className={`worker-note ${automationOnline ? "online" : ""}`}>
-              <span className="mini-dot" /> {automationOnline ? "Ubuntu worker is reachable." : automationOnline === false ? "Worker is offline. Nothing will be written until it returns." : "Checking worker availability…"}
+              <span className="mini-dot" /> {automationOnline ? "Ubuntu worker is reachable." : automationOnline === false ? "Worker is offline. Nothing will be downloaded until it returns." : "Checking worker availability…"}
             </p>
           </section>
 
@@ -290,19 +412,125 @@ function HomeContent() {
               <>
                 <div className="progress-summary"><strong>{finishedRows}/{job.rows.length}</strong><span>rows complete</span></div>
                 <div className="progress-track"><span style={{ width: `${job.rows.length ? (finishedRows / job.rows.length) * 100 : 0}%` }} /></div>
-                <div className="row-statuses">{job.rows.map((row) => <div key={row.row_id}><span className={`mini-dot ${row.state}`} />{row.file || row.state.replaceAll("_", " ")}</div>)}</div>
+                <div className="row-statuses">
+                  {job.rows.map((r) => (
+                    <div key={r.row_id}>
+                      <span className={`mini-dot ${r.state}`} />
+                      Row {r.sheet_row ?? "?"} — {r.file || r.state.replaceAll("_", " ")}
+                    </div>
+                  ))}
+                </div>
               </>
-            ) : <p className="empty-copy">Your next batch will appear here once it is queued.</p>}
+            ) : <p className="empty-copy">Your next batch will appear here once a download is queued.</p>}
           </section>
         </aside>
-      </section>
+      </div>
 
-      {(initialMessage || error || oauthError) && <div className={`notice ${error || oauthError ? "notice-error" : ""}`} role="status">{error || (oauthError ? `Google sign-in failed: ${oauthError}` : initialMessage)}</div>}
+      {rows.length > 0 && (
+        <>
+          <div className="rule" />
+          <section className="card" style={{ marginTop: "1.5rem" }}>
+            <div className="card-heading">
+              <div>
+                <p className="section-label">Existing tasks</p>
+                <h2>Rows for {date}</h2>
+              </div>
+              <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+                {loadingRows && <span className="step-mark">LOADING…</span>}
+                {dirtyCount > 0 && (
+                  <button className="primary-button" onClick={handleSync} disabled={syncing} style={{ padding: "0.5rem 1rem", fontSize: "0.85rem" }}>
+                    {syncing ? "Syncing…" : `Sync ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`}
+                  </button>
+                )}
+                <span className="count">{rows.length} row{rows.length === 1 ? "" : "s"}</span>
+              </div>
+            </div>
+
+            <div className="entry-list">
+              {rows.map((row) => {
+                const hasLink = !!row.post_link;
+                const canvaLink = canvaLinks[row.row_number] ?? "";
+                const isDownloading = downloadingRow === row.row_number;
+                return (
+                  <div className="entry-row" key={row.row_number}>
+                    <span className="row-number">{String(row.row_number).padStart(2, "0")}</span>
+                    <div className="entry-fields">
+                      <div className="entry-selects">
+                        <label>Business
+                          <select value={row.account} onChange={(e) => updateRow(row.row_number, "account", e.target.value)}>
+                            {ACCOUNTS.map(([label, value]) => <option value={value} key={value}>{label}</option>)}
+                          </select>
+                        </label>
+                        <label>Content type
+                          <select value={row.task_type} onChange={(e) => updateRow(row.row_number, "task_type", e.target.value)}>
+                            {TASK_TYPES.map((v) => <option value={v} key={v}>{v}</option>)}
+                          </select>
+                        </label>
+                        <label>Status
+                          <select value={row.status} onChange={(e) => updateRow(row.row_number, "status", e.target.value)}>
+                            {STATUSES.map((v) => <option value={v} key={v}>{v}</option>)}
+                          </select>
+                        </label>
+                      </div>
+                      <input
+                        value={row.task_description}
+                        onChange={(e) => updateRow(row.row_number, "task_description", e.target.value)}
+                        placeholder="Task description"
+                        aria-label={`Task description for row ${row.row_number}`}
+                      />
+                      {hasLink ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.5rem 0" }}>
+                          <span className="mini-dot done" />
+                          <span style={{ fontSize: "0.85rem", color: "var(--ok, #22c55e)" }}>Delivered</span>
+                          <a href={row.post_link} target="_blank" rel="noreferrer" style={{ fontSize: "0.8rem", opacity: 0.8 }}>View on Drive ↗</a>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                          <input
+                            value={canvaLink}
+                            onChange={(e) => updateCanvaLink(row.row_number, e.target.value)}
+                            placeholder="Paste Canva link to download…"
+                            type="url"
+                            style={{ flex: 1 }}
+                            aria-label={`Canva link for row ${row.row_number}`}
+                          />
+                          <button
+                            type="button"
+                            className="primary-button"
+                            disabled={!canvaLink.trim() || isDownloading || activeJobRows > 0}
+                            onClick={() => handleDownload(row.row_number)}
+                            style={{ padding: "0.5rem 1rem", fontSize: "0.85rem", whiteSpace: "nowrap" }}
+                          >
+                            {isDownloading ? "Queuing…" : "Download"}
+                          </button>
+                        </div>
+                      )}
+                      {dirtyRows.has(row.row_number) && (
+                        <small style={{ opacity: 0.6 }}>Edited — click Sync to save</small>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </>
+      )}
+
+      {(initialMessage || error || oauthError) && (
+        <div className={`notice ${error || oauthError ? "notice-error" : ""}`} role="status">
+          {error || (oauthError ? `Google sign-in failed: ${oauthError}` : initialMessage)}
+        </div>
+      )}
       <footer><span>Events / Canva automation</span><span>One batch at a time · Ubuntu worker</span></footer>
     </main>
   );
 }
 
 export default function Home() {
-  return <Suspense fallback={<main className="shell"><p className="eyebrow">CANVA → DRIVE / CONTROL DESK</p><h1>Loading desk…</h1></main>}><HomeContent /></Suspense>;
+  return (
+    <Suspense fallback={<main className="shell"><p className="eyebrow">CANVA → DRIVE / CONTROL DESK</p><h1>Loading desk…</h1></main>}>
+      <HomeContent />
+    </Suspense>
+  );
 }

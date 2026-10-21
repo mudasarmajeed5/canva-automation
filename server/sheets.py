@@ -80,6 +80,158 @@ def append_rows(token: str, date: str, rows: list[RowInput]) -> dict[str, int]:
     return {row.row_id: first_row + index for index, row in enumerate(rows)}
 
 
+def read_rows(token: str, date: str) -> list[dict]:
+    """Read all data rows matching ``date`` from the Sheet."""
+    if not token:
+        raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
+
+    settings = get_settings()
+    service = _service(token)
+    headers = _header_map(service, settings.sheet_tab, settings.sheet_id)
+    width = max(headers.values()) + 1
+
+    values = _get_values(service, settings.sheet_id, _tab_range(settings.sheet_tab, f"A2:{_column_letter(width - 1)}"))
+    rows: list[dict] = []
+    for index, row_values in enumerate(values):
+        sheet_row = index + 2
+        cells = list(row_values) + [""] * (width - len(row_values))
+        row_date = str(cells[headers["Date"]]).strip()
+        if row_date != date:
+            continue
+        rows.append(
+            {
+                "row_number": sheet_row,
+                "date": row_date,
+                "account": str(cells[headers["Business/Account"]]).strip(),
+                "task_type": str(cells[headers["Task Type"]]).strip(),
+                "task_description": str(cells[headers["Task Description"]]).strip(),
+                "status": str(cells[headers["Status"]]).strip(),
+                "post_link": str(cells[headers["Post Link"]]).strip(),
+            }
+        )
+    return rows
+
+
+def create_rows(token: str, date: str, rows: list[RowInput]) -> dict[str, int]:
+    """Append rows to the Sheet with an empty Post Link column."""
+    if not token:
+        raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
+    if not rows:
+        return {}
+
+    settings = get_settings()
+    service = _service(token)
+    headers = _header_map(service, settings.sheet_tab, settings.sheet_id)
+    width = max(headers.values()) + 1
+    values = []
+    for row in rows:
+        values.append(
+            _row_values(
+                width,
+                headers,
+                {
+                    "Date": date,
+                    "Business/Account": row.account,
+                    "Task Type": row.task_type,
+                    "Task Description": row.task_description,
+                    "Status": row.status,
+                    "Post Link": "",
+                },
+            )
+        )
+
+    response = _execute(
+        lambda: service.spreadsheets()
+        .values()
+        .append(
+            spreadsheetId=settings.sheet_id,
+            range=_tab_range(settings.sheet_tab, "A1"),
+            valueInputOption=settings.date_input_mode,
+            insertDataOption="INSERT_ROWS",
+            includeValuesInResponse=False,
+            body={"values": values},
+        )
+    )
+    first_row = _first_row_from_updated_range(response.get("updates", {}).get("updatedRange", ""))
+    if first_row is None:
+        raise AutomationError(
+            "SHEET_APPEND_FAILED",
+            "Google Sheets did not return the range of the appended rows.",
+        )
+    return {row.row_id: first_row + index for index, row in enumerate(rows)}
+
+
+def update_rows(token: str, updates: list[dict]) -> None:
+    """Batch-update cells in existing rows. Does not touch Post Link."""
+    if not token:
+        raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
+    if not updates:
+        return
+
+    settings = get_settings()
+    service = _service(token)
+    headers = _header_map(service, settings.sheet_tab, settings.sheet_id)
+    width = max(headers.values()) + 1
+
+    field_to_header = {
+        "account": "Business/Account",
+        "task_type": "Task Type",
+        "task_description": "Task Description",
+        "status": "Status",
+    }
+
+    for update in updates:
+        row_number = update["row_number"]
+        if row_number < 2:
+            raise AutomationError("SHEET_ROW_NOT_FOUND", f"Invalid row number: {row_number}")
+
+        values_map: dict[str, str] = {"Date": ""}
+        for field, header in field_to_header.items():
+            value = update.get(field)
+            if value is not None:
+                values_map[header] = value
+
+        row_vals = [""] * width
+        for header, value in values_map.items():
+            if header in headers and value:
+                row_vals[headers[header]] = value
+
+        _execute(
+            lambda rn=row_number, rv=row_vals: service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=settings.sheet_id,
+                range=_tab_range(settings.sheet_tab, f"A{rn}:{_column_letter(width - 1)}{rn}"),
+                valueInputOption="RAW",
+                body={"values": [rv]},
+            )
+        )
+
+
+def set_drive_link(token: str, row_number: int, drive_url: str) -> None:
+    """Write the Drive share URL to the Post Link column at the given row."""
+    if not token:
+        raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
+    if row_number < 2:
+        raise AutomationError("SHEET_ROW_NOT_FOUND", "The Sheet row number is invalid.")
+
+    settings = get_settings()
+    service = _service(token)
+    headers = _header_map(service, settings.sheet_tab, settings.sheet_id)
+    post_column = _column_letter(headers["Post Link"])
+
+    _execute(
+        lambda: service.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=settings.sheet_id,
+            range=_tab_range(settings.sheet_tab, f"{post_column}{row_number}"),
+            valueInputOption="RAW",
+            body={"values": [[drive_url]]},
+        )
+    )
+
+
 def set_post_link(token: str, row_number: int, canva_link: str, drive_url: str) -> None:
     """Replace only the matching Post Link cell with the Drive URL."""
     if not token:
