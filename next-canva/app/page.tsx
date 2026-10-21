@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 const ACCOUNTS = [
@@ -67,6 +67,26 @@ function defaultNewEntry(): NewEntry {
   };
 }
 
+const STORE_TOKEN = "canva.google.token";
+const STORE_EMAIL = "canva.google.email";
+
+function loadStored(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveStored(key: string, value: string) {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 function HomeContent() {
   const searchParams = useSearchParams();
   const [date, setDate] = useState(today);
@@ -86,7 +106,6 @@ function HomeContent() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [automationOnline, setAutomationOnline] = useState<boolean | null>(null);
-  const fetchedRef = useRef(false);
 
   const oauthError = searchParams.get("error") ?? "";
   const activeToken = token || oauthToken;
@@ -95,8 +114,19 @@ function HomeContent() {
   useEffect(() => {
     const t = searchParams.get("token");
     const e = searchParams.get("email");
-    if (t) setOauthToken(t);
-    if (e) setOauthEmail(e);
+    if (t) {
+      setOauthToken(t);
+      saveStored(STORE_TOKEN, t);
+      if (e) {
+        setOauthEmail(e);
+        saveStored(STORE_EMAIL, e);
+      }
+    } else {
+      const storedToken = loadStored(STORE_TOKEN);
+      const storedEmail = loadStored(STORE_EMAIL);
+      if (storedToken) setOauthToken(storedToken);
+      if (storedEmail) setOauthEmail(storedEmail);
+    }
     if (window.location.search) window.history.replaceState({}, "", "/");
   }, [searchParams]);
 
@@ -133,8 +163,7 @@ function HomeContent() {
   }, [activeToken, date]);
 
   useEffect(() => {
-    if (!activeToken || fetchedRef.current) return;
-    fetchedRef.current = true;
+    if (!activeToken) return;
     fetchRows();
   }, [activeToken, fetchRows]);
 
@@ -308,11 +337,12 @@ function HomeContent() {
       setToken("");
       setOauthToken("");
       setOauthEmail("");
+      saveStored(STORE_TOKEN, "");
+      saveStored(STORE_EMAIL, "");
       setRows([]);
       setDirtyRows(new Set());
       setCanvaLinks({});
       setJob(null);
-      fetchedRef.current = false;
       setMessage("Google access revoked. Connect again when ready.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not revoke access.");
@@ -448,7 +478,7 @@ function HomeContent() {
                 <a className="google-button" href="/api/auth/google">Continue with Google <span>↗</span></a>
                 <label className="token-label">
                   Access token
-                  <textarea value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste token here if you already have one" rows={3} spellCheck={false} />
+                  <textarea value={token} onChange={(e) => { const v = e.target.value; setToken(v); saveStored(STORE_TOKEN, v.trim()); }} placeholder="Paste token here if you already have one" rows={3} spellCheck={false} />
                 </label>
               </>
             )}
