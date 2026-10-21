@@ -12,7 +12,7 @@ export async function GET(request: Request) {
   if (!clientId || !clientSecret) {
     return NextResponse.json({ error: "Google OAuth is not configured." }, { status: 500 });
   }
-  const callback = new URL("/api/auth/google/callback", url.origin);
+  const callback = new URL("/api/auth/callback/google", url.origin);
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },

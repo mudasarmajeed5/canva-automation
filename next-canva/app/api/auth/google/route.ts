@@ -6,7 +6,7 @@ export function GET(request: Request) {
   if (!clientId) {
     return NextResponse.json({ error: "GOOGLE_CLIENT_ID is not configured." }, { status: 500 });
   }
-  const callback = new URL("/api/auth/google/callback", url.origin);
+  const callback = new URL("/api/auth/callback/google", url.origin);
   const auth = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   auth.searchParams.set("client_id", clientId);
   auth.searchParams.set("redirect_uri", callback.toString());

@@ -5,18 +5,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=canva-auto
-Group=canva-auto
-WorkingDirectory=/opt/canva-automation
-EnvironmentFile=/opt/canva-automation/.env
-# Headed Chrome needs a virtual display; xvfb-run provides one per start.
-ExecStart=/usr/bin/xvfb-run -a /opt/canva-automation/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+User=mudassar
+Group=mudassar
+WorkingDirectory=/home/mudassar/code/python-automation/canva-automation/server
+EnvironmentFile=/home/mudassar/code/python-automation/canva-automation/server/.env
+Environment=DISPLAY=:2
+Environment=WAYLAND_DISPLAY=
+Environment=XDG_SESSION_TYPE=
+ExecStart=/home/mudassar/code/python-automation/canva-automation/server/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8473
 Restart=always
 RestartSec=5
-# The Chrome profile and downloads contain the logged-in Canva session.
 UMask=0077
 NoNewPrivileges=true
-PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

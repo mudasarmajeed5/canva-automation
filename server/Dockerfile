@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM mcr.microsoft.com/playwright/python:v1.64.0-noble
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -9,16 +9,11 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt \
-    && playwright install --with-deps chromium
+RUN pip install -r requirements.txt
 
 COPY . .
 
-RUN useradd -m -u 1000 app \
-    && mkdir -p /app/downloads /app/data /app/chrome-profile /app/debug \
-    && chown -R app:app /app /ms-playwright
-
-USER app
+RUN mkdir -p /app/downloads /app/data /app/chrome-profile /app/debug
 
 EXPOSE 8473
 

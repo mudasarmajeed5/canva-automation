@@ -22,13 +22,13 @@ worker. It supports:
 4. Add this authorized redirect URI:
 
    ```text
-   https://YOUR-VERCEL-DOMAIN/api/auth/google/callback
+   https://YOUR-VERCEL-DOMAIN/api/auth/callback/google
    ```
 
    For local development, also add:
 
    ```text
-   http://localhost:3000/api/auth/google/callback
+   http://localhost:3000/api/auth/callback/google
    ```
 
 5. Configure the same account with edit access to the target Sheet and Drive
