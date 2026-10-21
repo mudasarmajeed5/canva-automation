@@ -82,6 +82,7 @@ function HomeContent() {
   const [adding, setAdding] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [downloadingRow, setDownloadingRow] = useState<number | null>(null);
+  const [revoking, setRevoking] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [automationOnline, setAutomationOnline] = useState<boolean | null>(null);
@@ -289,11 +290,41 @@ function HomeContent() {
     }
   }
 
+  async function handleRevoke() {
+    if (!activeToken) return;
+    setError("");
+    setMessage("");
+    setRevoking(true);
+    try {
+      const response = await fetch("/api/auth/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: activeToken }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || "Could not revoke access.");
+      }
+      setToken("");
+      setOauthToken("");
+      setOauthEmail("");
+      setRows([]);
+      setDirtyRows(new Set());
+      setCanvaLinks({});
+      setJob(null);
+      fetchedRef.current = false;
+      setMessage("Google access revoked. Connect again when ready.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not revoke access.");
+    } finally {
+      setRevoking(false);
+    }
+  }
+
   const initialMessage = useMemo(() => {
     if (oauthError) return "";
-    if (activeToken && !message) return "Google is connected. The access token is ready for this session.";
     return message;
-  }, [activeToken, message, oauthError]);
+  }, [message, oauthError]);
 
   return (
     <main className="shell">
@@ -388,16 +419,39 @@ function HomeContent() {
         <aside className="side-column">
           <section className="card connect-card">
             <div className="card-heading compact">
-              <div><p className="section-label">Access</p><h2>Connect Google</h2></div>
-              <span className="google-button">G</span>
+              <div>
+                <p className="section-label">Access</p>
+                <h2>{activeToken ? "Google connected" : "Connect Google"}</h2>
+              </div>
             </div>
-            <p className="muted">Authorize Sheets and Drive, then use the token for this session only.</p>
-            <a className="google-button" href="/api/auth/google">Continue with Google <span>↗</span></a>
-            <label className="token-label">
-              Access token
-              <textarea value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste token here if you already have one" rows={3} spellCheck={false} />
-            </label>
-            {activeEmail && <p className="connected-as">Connected as <strong>{activeEmail}</strong></p>}
+            {activeToken ? (
+              <>
+                <p className="connected-as">
+                  Connected as <strong>{activeEmail || "your Google account"}</strong>
+                </p>
+                <p className="muted" style={{ marginTop: 8 }}>
+                  Sheets and Drive access is active for this session.
+                </p>
+                <button
+                  type="button"
+                  className="google-button"
+                  onClick={handleRevoke}
+                  disabled={revoking}
+                  style={{ marginTop: 16 }}
+                >
+                  {revoking ? "Revoking…" : "Revoke access"} <span>✕</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="muted">Authorize Sheets and Drive, then use the token for this session only.</p>
+                <a className="google-button" href="/api/auth/google">Continue with Google <span>↗</span></a>
+                <label className="token-label">
+                  Access token
+                  <textarea value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste token here if you already have one" rows={3} spellCheck={false} />
+                </label>
+              </>
+            )}
             <p className={`worker-note ${automationOnline ? "online" : ""}`}>
               <span className="mini-dot" /> {automationOnline ? "Ubuntu worker is reachable." : automationOnline === false ? "Worker is offline. Nothing will be downloaded until it returns." : "Checking worker availability…"}
             </p>
