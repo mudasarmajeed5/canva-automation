@@ -1,0 +1,8 @@
+.env
+data/
+downloads/
+debug/
+chrome-profile/
+test_downloads/
+__pycache__/
+*.pyc

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="10">
+  <title>Canva Automation — Status</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f14;
+      --panel: #131a22;
+      --border: #222d3a;
+      --text: #e7edf4;
+      --muted: #8b9bad;
+      --ok: #35d07f;
+      --warn: #f2b544;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(1200px 600px at 20% -10%, #16222e 0%, var(--bg) 55%);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      justify-content: center;
+      padding: 48px 20px;
+    }
+    .wrap { width: 100%; max-width: 760px; }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 6px;
+    }
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 4px rgba(53, 208, 127, 0.15);
+      flex: none;
+    }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 0 4px rgba(242, 181, 68, 0.15); }
+    h1 { font-size: 1.35rem; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
+    .sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 28px 26px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+    }
+    .label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .value {
+      font-size: 0.98rem;
+      line-height: 1.45;
+      word-break: break-word;
+      font-variant-numeric: tabular-nums;
+    }
+    .value.ok { color: var(--ok); }
+    .value.warn { color: var(--warn); }
+    .wide { grid-column: 1 / -1; }
+    footer {
+      margin-top: 26px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="brand"><span class="dot"></span><h1>Automation online</h1></div>
+    <p class="sub">events.mudasarmajeed5.tech · Canva → Google Drive pipeline</p>
+
+    <section class="grid">
+      <div class="card wide">
+        <div class="label">Worker</div>
+        <div class="value">{{ worker }}</div>
+      </div>
+      <div class="card">
+        <div class="label">Queue</div>
+        <div class="value">{{ queue }} job(s)</div>
+      </div>
+      <div class="card">
+        <div class="label">Canva session</div>
+        <div class="value {{ canva_class }}">{{ canva_session }}</div>
+      </div>
+      <div class="card">
+        <div class="label">Last successful job</div>
+        <div class="value">{{ last_success }}</div>
+      </div>
+      <div class="card">
+        <div class="label">Disk free (downloads)</div>
+        <div class="value">{{ disk_free }}</div>
+      </div>
+      <div class="card wide">
+        <div class="label">Files left on disk</div>
+        <div class="value">{{ leftover_files }}</div>
+      </div>
+    </section>
+
+    <footer>
+      <span>Updated {{ updated_at }}</span>
+      <span>Refreshes every 10 s</span>
+    </footer>
+  </main>
+</body>
+</html>

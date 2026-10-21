@@ -1,0 +1,15 @@
+# Module 1 (server core) — real dependencies
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+python-dotenv>=1.0
+
+# Modules 3–4 (Google Sheets / Drive)
+google-api-python-client>=2.140
+google-auth>=2.34
+
+# Module 4 routing config
+PyYAML>=6.0
+
+# Module 2 (Playwright bot)
+playwright>=1.47

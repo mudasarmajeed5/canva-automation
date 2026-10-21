@@ -1,0 +1,22 @@
+accounts:
+  Excel Executive Cars: excel
+  Platinum Exetuive Car: platinum
+  Reading Chauffers: reading
+  First Class Cars: first class
+
+file_rules:
+  - keywords: [carousel]
+    hint: carousel
+  - keywords: [reel, .mp4]
+    hint: reel
+  - keywords: [meme]
+    hint: meme
+  - keywords: [story, stories, highlight]
+    hint: insta
+  - keywords: [post, static]
+    hint: post
+
+task_fallbacks:
+  Video/Reel Editing: reel
+  Branding/Other: insta
+  Graphic Design - Static Post/Carousel: post
