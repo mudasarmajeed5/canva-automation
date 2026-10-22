@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     job_id        TEXT PRIMARY KEY,
     date          TEXT NOT NULL,
     requested_by  TEXT,
+    sheet_id      TEXT NOT NULL DEFAULT '',
     state         TEXT NOT NULL,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
@@ -105,6 +106,11 @@ class JobStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(jobs)")}
+            if "sheet_id" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN sheet_id TEXT NOT NULL DEFAULT ''"
+                )
             self._conn.commit()
 
     def close(self) -> None:
@@ -120,13 +126,14 @@ class JobStore:
         requested_by: str | None,
         rows: Iterable[RowInput],
         sheet_rows: dict[str, int],
+        sheet_id: str = "",
     ) -> None:
         now = utcnow_iso()
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO jobs (job_id, date, requested_by, state, created_at, updated_at)"
-                " VALUES (?, ?, ?, 'queued', ?, ?)",
-                (job_id, sheet_date, requested_by, now, now),
+                "INSERT INTO jobs (job_id, date, requested_by, sheet_id, state, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, 'queued', ?, ?)",
+                (job_id, sheet_date, requested_by, sheet_id, now, now),
             )
             for position, row in enumerate(rows):
                 self._conn.execute(
@@ -257,6 +264,7 @@ def _job_to_dict(job: sqlite3.Row, rows: Iterable[sqlite3.Row]) -> dict:
         "job_id": job["job_id"],
         "state": job["state"],
         "date": job["date"],
+        "sheet_id": job["sheet_id"],
         "created_at": job["created_at"],
         "updated_at": job["updated_at"],
         "rows": [

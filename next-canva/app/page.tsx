@@ -1,7 +1,8 @@
 "use client";
 
-import { FormEvent, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { signIn, signOut, useSession } from "next-auth/react";
 
 const ACCOUNTS = [
   ["Excel Executive Cars", "Excel Executive Cars"],
@@ -33,6 +34,7 @@ type NewEntry = {
   task_type: string;
   task_description: string;
   status: string;
+  canva_link: string;
 };
 
 type Job = {
@@ -47,6 +49,41 @@ type Job = {
     error: string | null;
   }>;
 };
+
+type ApiBody = {
+  message?: string;
+  error?: string;
+  rows?: SheetRow[];
+  rows_written?: number;
+  row_numbers?: Record<string, number>;
+  updated?: number;
+  online?: boolean;
+  job_id?: string;
+  state?: string;
+};
+
+async function readJson(response: Response): Promise<ApiBody> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as ApiBody;
+  } catch {
+    throw new Error("The server returned an unexpected response. The automation backend may be unreachable.");
+  }
+}
+
+function isValidCanvaLink(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      ["canva.com", "www.canva.com", "canva.link"].includes(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+const SHEET_STORE = "canva.sheet.id";
 
 function today() {
   return new Intl.DateTimeFormat("en-GB", {
@@ -64,35 +101,14 @@ function defaultNewEntry(): NewEntry {
     task_type: TASK_TYPES[0],
     task_description: "",
     status: "Done",
+    canva_link: "",
   };
-}
-
-const STORE_TOKEN = "canva.google.token";
-const STORE_EMAIL = "canva.google.email";
-
-function loadStored(key: string): string {
-  try {
-    return localStorage.getItem(key) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function saveStored(key: string, value: string) {
-  try {
-    if (value) localStorage.setItem(key, value);
-    else localStorage.removeItem(key);
-  } catch {
-    /* storage unavailable */
-  }
 }
 
 function HomeContent() {
   const searchParams = useSearchParams();
+  const { data: session, status } = useSession();
   const [date, setDate] = useState(today);
-  const [token, setToken] = useState("");
-  const [oauthToken, setOauthToken] = useState("");
-  const [oauthEmail, setOauthEmail] = useState("");
   const [rows, setRows] = useState<SheetRow[]>([]);
   const [newEntries, setNewEntries] = useState<NewEntry[]>([defaultNewEntry()]);
   const [canvaLinks, setCanvaLinks] = useState<Record<number, string>>({});
@@ -106,47 +122,53 @@ function HomeContent() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [automationOnline, setAutomationOnline] = useState<boolean | null>(null);
+  const [sheetId, setSheetId] = useState("");
 
   const oauthError = searchParams.get("error") ?? "";
-  const activeToken = token || oauthToken;
-  const activeEmail = oauthEmail;
+  const activeToken = session?.accessToken ?? "";
+  const activeEmail = session?.user?.email ?? "";
+  const sessionLoading = status === "loading";
 
   useEffect(() => {
-    const t = searchParams.get("token");
-    const e = searchParams.get("email");
-    if (t) {
-      setOauthToken(t);
-      saveStored(STORE_TOKEN, t);
-      if (e) {
-        setOauthEmail(e);
-        saveStored(STORE_EMAIL, e);
-      }
-    } else {
-      const storedToken = loadStored(STORE_TOKEN);
-      const storedEmail = loadStored(STORE_EMAIL);
-      if (storedToken) setOauthToken(storedToken);
-      if (storedEmail) setOauthEmail(storedEmail);
+    try {
+      const stored = localStorage.getItem(SHEET_STORE);
+      if (stored) setSheetId(stored);
+    } catch {
+      /* storage unavailable */
     }
+  }, []);
+
+  function updateSheetId(value: string) {
+    setSheetId(value);
+    try {
+      if (value.trim()) localStorage.setItem(SHEET_STORE, value.trim());
+      else localStorage.removeItem(SHEET_STORE);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+
+  useEffect(() => {
     if (window.location.search) window.history.replaceState({}, "", "/");
   }, [searchParams]);
 
   useEffect(() => {
     let mounted = true;
     fetch("/api/automation-health")
-      .then((r) => r.json())
+      .then((r) => readJson(r))
       .then((body) => mounted && setAutomationOnline(body.online === true))
       .catch(() => mounted && setAutomationOnline(false));
     return () => { mounted = false; };
   }, []);
 
   const fetchRows = useCallback(async () => {
-    if (!activeToken || !date) return;
+    if (!activeToken || !date || !sheetId.trim()) return;
     setLoadingRows(true);
     setError("");
     try {
-      const params = new URLSearchParams({ date, token: activeToken });
+      const params = new URLSearchParams({ date, token: activeToken, sheet_id: sheetId.trim() });
       const response = await fetch(`/api/sheet-rows?${params}`);
-      const body = await response.json();
+      const body = await readJson(response);
       if (!response.ok) throw new Error(body.message || body.error || "Could not load rows.");
       setRows(body.rows || []);
       setDirtyRows(new Set());
@@ -160,7 +182,7 @@ function HomeContent() {
     } finally {
       setLoadingRows(false);
     }
-  }, [activeToken, date]);
+  }, [activeToken, date, sheetId]);
 
   useEffect(() => {
     if (!activeToken) return;
@@ -170,13 +192,17 @@ function HomeContent() {
   useEffect(() => {
     if (!job || ["done", "done_with_errors", "failed"].includes(job.state)) return;
     const timer = window.setInterval(async () => {
-      const response = await fetch(`/api/jobs/${job.job_id}`);
-      if (response.ok) {
-        const updated = await response.json();
-        setJob(updated);
-        if (["done", "done_with_errors", "failed"].includes(updated.state)) {
-          fetchRows();
+      try {
+        const response = await fetch(`/api/jobs/${job.job_id}`);
+        if (response.ok) {
+          const updated = (await readJson(response)) as unknown as Job;
+          setJob(updated);
+          if (["done", "done_with_errors", "failed"].includes(updated.state)) {
+            fetchRows();
+          }
         }
+      } catch {
+        /* transient poll failure; next tick retries */
       }
     }, 2500);
     return () => window.clearInterval(timer);
@@ -217,32 +243,84 @@ function HomeContent() {
       setError("Connect Google first.");
       return;
     }
+    if (!sheetId.trim()) {
+      setError("Paste your Google Sheet ID first.");
+      return;
+    }
     const valid = newEntries.filter((e) => e.task_description.trim());
     if (!valid.length) {
       setError("Add a description for at least one task.");
       return;
     }
+    const badLink = valid.find((e) => e.canva_link.trim() && !isValidCanvaLink(e.canva_link.trim()));
+    if (badLink) {
+      setError("Canva links must be https:// links on canva.com or canva.link.");
+      return;
+    }
     setAdding(true);
     try {
+      const rowsPayload = valid.map((entry) => ({
+        row_id: crypto.randomUUID(),
+        account: entry.account,
+        task_type: entry.task_type,
+        task_description: entry.task_description.trim(),
+        status: entry.status,
+        canva_link: "",
+      }));
       const response = await fetch("/api/sheet-rows", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           google_access_token: activeToken.trim(),
           date,
-          rows: valid.map((entry, i) => ({
-            row_id: crypto.randomUUID(),
-            account: entry.account,
-            task_type: entry.task_type,
-            task_description: entry.task_description.trim(),
-            status: entry.status,
-            canva_link: "",
-          })),
+          sheet_id: sheetId.trim(),
+          rows: rowsPayload,
         }),
       });
-      const body = await response.json();
+      const body = await readJson(response);
       if (!response.ok) throw new Error(body.message || body.error || "Could not add rows.");
       setMessage(`Added ${body.rows_written} task${body.rows_written === 1 ? "" : "s"} to Sheet.`);
+
+      const rowNumbers = body.row_numbers ?? {};
+      const downloadRows = valid
+        .map((entry, index) => ({ entry, rowNumber: rowNumbers[rowsPayload[index].row_id] }))
+        .filter((item) => item.entry.canva_link.trim() && typeof item.rowNumber === "number")
+        .map((item) => ({
+          row_number: item.rowNumber as number,
+          account: item.entry.account,
+          task_type: item.entry.task_type,
+          canva_link: item.entry.canva_link.trim(),
+        }));
+
+      if (downloadRows.length) {
+        try {
+          const dlResponse = await fetch("/api/download", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              google_access_token: activeToken.trim(),
+              date,
+              sheet_id: sheetId.trim(),
+              rows: downloadRows,
+            }),
+          });
+          const dlBody = await readJson(dlResponse);
+          if (!dlResponse.ok) {
+            throw new Error(dlBody.message || dlBody.error || "could not queue the downloads.");
+          }
+          setJob({ job_id: dlBody.job_id ?? "", state: dlBody.state ?? "queued", rows: [] });
+          setMessage(
+            `Added ${body.rows_written} task${body.rows_written === 1 ? "" : "s"} to Sheet. ` +
+              `Queued ${downloadRows.length} download${downloadRows.length === 1 ? "" : "s"} — watch the Live queue.`,
+          );
+        } catch (dlErr) {
+          setError(
+            `Rows were added, but queuing downloads failed: ${
+              dlErr instanceof Error ? dlErr.message : "unknown error"
+            }. Paste the Canva links under Existing tasks to retry.`,
+          );
+        }
+      }
       setNewEntries([defaultNewEntry()]);
       await fetchRows();
     } catch (err) {
@@ -254,6 +332,10 @@ function HomeContent() {
 
   async function handleSync() {
     if (!dirtyCount || !activeToken.trim()) return;
+    if (!sheetId.trim()) {
+      setError("Paste your Google Sheet ID first.");
+      return;
+    }
     setError("");
     setMessage("");
     setSyncing(true);
@@ -271,9 +353,13 @@ function HomeContent() {
       const response = await fetch("/api/sheet-rows", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ google_access_token: activeToken.trim(), updates }),
+        body: JSON.stringify({
+          google_access_token: activeToken.trim(),
+          sheet_id: sheetId.trim(),
+          updates,
+        }),
       });
-      const body = await response.json();
+      const body = await readJson(response);
       if (!response.ok) throw new Error(body.message || body.error || "Could not sync.");
       setMessage(`Synced ${body.updated} row${body.updated === 1 ? "" : "s"} to Sheet.`);
       setDirtyRows(new Set());
@@ -288,6 +374,14 @@ function HomeContent() {
     const row = rows.find((r) => r.row_number === rowNumber);
     const canvaLink = canvaLinks[rowNumber]?.trim();
     if (!row || !canvaLink || !activeToken.trim()) return;
+    if (!sheetId.trim()) {
+      setError("Paste your Google Sheet ID first.");
+      return;
+    }
+    if (!isValidCanvaLink(canvaLink)) {
+      setError("Canva links must be https:// links on canva.com or canva.link.");
+      return;
+    }
     setError("");
     setMessage("");
     setDownloadingRow(rowNumber);
@@ -298,6 +392,7 @@ function HomeContent() {
         body: JSON.stringify({
           google_access_token: activeToken.trim(),
           date,
+          sheet_id: sheetId.trim(),
           rows: [
             {
               row_number: rowNumber,
@@ -308,9 +403,9 @@ function HomeContent() {
           ],
         }),
       });
-      const body = await response.json();
+      const body = await readJson(response);
       if (!response.ok) throw new Error(body.message || body.error || "Could not queue download.");
-      setJob(body);
+      setJob({ job_id: body.job_id ?? "", state: body.state ?? "queued", rows: [] });
       setMessage(`Download queued for row ${rowNumber}. Watch the VNC screen.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not queue download.");
@@ -334,27 +429,18 @@ function HomeContent() {
         const body = await response.json().catch(() => ({}));
         throw new Error(body.error || "Could not revoke access.");
       }
-      setToken("");
-      setOauthToken("");
-      setOauthEmail("");
-      saveStored(STORE_TOKEN, "");
-      saveStored(STORE_EMAIL, "");
       setRows([]);
       setDirtyRows(new Set());
       setCanvaLinks({});
       setJob(null);
       setMessage("Google access revoked. Connect again when ready.");
+      await signOut({ callbackUrl: "/" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not revoke access.");
     } finally {
       setRevoking(false);
     }
   }
-
-  const initialMessage = useMemo(() => {
-    if (oauthError) return "";
-    return message;
-  }, [message, oauthError]);
 
   return (
     <main className="shell">
@@ -388,6 +474,32 @@ function HomeContent() {
             Calendar date
             <input value={date} onChange={(e) => setDate(e.target.value)} placeholder="21-Oct-2026" required />
             <small>Tasks are added to and loaded from the Sheet for this date.</small>
+          </label>
+
+          <label className="date-field">
+            Google Sheet ID
+            <input
+              value={sheetId}
+              onChange={(e) => updateSheetId(e.target.value)}
+              placeholder="ID from the sheet URL — between /d/ and /edit"
+              spellCheck={false}
+            />
+            <small>
+              Saved in this browser. Row 1 must contain: Date, Business/Account, Task Type,
+              Task Description, Status, Post Link.
+              {sheetId.trim() && (
+                <>
+                  {" "}
+                  <a
+                    href={`https://docs.google.com/spreadsheets/d/${sheetId.trim()}/edit`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open Sheet ↗
+                  </a>
+                </>
+              )}
+            </small>
           </label>
 
           <form onSubmit={handleAdd}>
@@ -427,6 +539,14 @@ function HomeContent() {
                       placeholder="Reel for Friday for 16-Oct-2026"
                       aria-label={`Task description ${index + 1}`}
                     />
+                    <input
+                      value={entry.canva_link}
+                      onChange={(e) => updateNewEntry(index, { canva_link: e.target.value })}
+                      placeholder="Canva link (optional — downloads automatically after adding)"
+                      type="url"
+                      spellCheck={false}
+                      aria-label={`Canva link ${index + 1}`}
+                    />
                   </div>
                   <button type="button" className="icon-button" onClick={() => removeNewEntry(index)} aria-label={`Remove task ${index + 1}`}>×</button>
                 </div>
@@ -437,7 +557,11 @@ function HomeContent() {
             <div className="submit-row">
               <div className="submit-note">
                 <span className="lock-icon">↗</span>
-                <span>Rows are added to Sheet with an empty Post Link.<br />Paste Canva links below to download.</span>
+                <span>
+                  Rows are added to Sheet with an empty Post Link.<br />
+                  Paste a Canva link on a task and it downloads automatically after adding —
+                  the Drive link lands back in that row&apos;s Post Link.
+                </span>
               </div>
               <button className="primary-button" disabled={adding}>
                 {adding ? "Adding…" : "Add to Sheet"} <span>→</span>
@@ -454,7 +578,9 @@ function HomeContent() {
                 <h2>{activeToken ? "Google connected" : "Connect Google"}</h2>
               </div>
             </div>
-            {activeToken ? (
+            {sessionLoading ? (
+              <p className="muted">Checking Google session…</p>
+            ) : activeToken ? (
               <>
                 <p className="connected-as">
                   Connected as <strong>{activeEmail || "your Google account"}</strong>
@@ -474,12 +600,10 @@ function HomeContent() {
               </>
             ) : (
               <>
-                <p className="muted">Authorize Sheets and Drive, then use the token for this session only.</p>
-                <a className="google-button" href="/api/auth/google">Continue with Google <span>↗</span></a>
-                <label className="token-label">
-                  Access token
-                  <textarea value={token} onChange={(e) => { const v = e.target.value; setToken(v); saveStored(STORE_TOKEN, v.trim()); }} placeholder="Paste token here if you already have one" rows={3} spellCheck={false} />
-                </label>
+                <p className="muted">Authorize Sheets and Drive to add, sync, and download tasks.</p>
+                <button type="button" className="google-button" onClick={() => signIn("google")}>
+                  Continue with Google <span>↗</span>
+                </button>
               </>
             )}
             <p className={`worker-note ${automationOnline ? "online" : ""}`}>
@@ -601,9 +725,9 @@ function HomeContent() {
         </>
       )}
 
-      {(initialMessage || error || oauthError) && (
+      {(message || error || oauthError) && (
         <div className={`notice ${error || oauthError ? "notice-error" : ""}`} role="status">
-          {error || (oauthError ? `Google sign-in failed: ${oauthError}` : initialMessage)}
+          {error || (oauthError ? `Google sign-in failed: ${oauthError}` : message)}
         </div>
       )}
       <footer><span>Events / Canva automation</span><span>One batch at a time · Ubuntu worker</span></footer>

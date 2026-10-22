@@ -81,6 +81,18 @@ def is_valid_canva_link(value: str) -> bool:
     return hostname in ALLOWED_CANVA_HOSTS
 
 
+def normalize_sheet_id(value: str) -> str:
+    """Accept the raw ID from a Sheets URL; empty means 'use the server default'."""
+    value = value.strip()
+    if not value:
+        return ""
+    if any(char.isspace() or char in "/?#&" for char in value):
+        raise ValueError(
+            "sheet_id must be the raw ID from the sheet URL (the part between /d/ and /edit)"
+        )
+    return value
+
+
 # --- Domain objects (interfaces from Section 5) ------------------------------
 
 
@@ -193,7 +205,10 @@ class JobRequest(BaseModel):
     date: str
     rows: list[RowIn] = Field(min_length=1)
     google_access_token: str = Field(min_length=10)
+    sheet_id: str = ""
     requested_by: str | None = None
+
+    _check_sheet_id = field_validator("sheet_id")(normalize_sheet_id)
 
     @field_validator("date")
     @classmethod
@@ -265,6 +280,9 @@ class CreateRowsRequest(BaseModel):
     google_access_token: str = Field(min_length=10)
     date: str
     rows: list[RowIn] = Field(min_length=1)
+    sheet_id: str = ""
+
+    _check_sheet_id = field_validator("sheet_id")(normalize_sheet_id)
 
     @field_validator("date")
     @classmethod
@@ -279,6 +297,9 @@ class UpdateRowsRequest(BaseModel):
 
     google_access_token: str = Field(min_length=10)
     updates: list[RowUpdate] = Field(min_length=1)
+    sheet_id: str = ""
+
+    _check_sheet_id = field_validator("sheet_id")(normalize_sheet_id)
 
 
 class DownloadItem(BaseModel):
@@ -319,6 +340,9 @@ class DownloadRequest(BaseModel):
     google_access_token: str = Field(min_length=10)
     date: str
     rows: list[DownloadItem] = Field(min_length=1)
+    sheet_id: str = ""
+
+    _check_sheet_id = field_validator("sheet_id")(normalize_sheet_id)
 
     @field_validator("date")
     @classmethod

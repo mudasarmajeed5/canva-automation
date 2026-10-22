@@ -36,6 +36,7 @@ async def run_job(
     job_id: str = job["job_id"]
     rows: list[dict] = job["rows"]
     total = len(rows)
+    sheet_id: str = job.get("sheet_id") or ""
     run_date = datetime.now().strftime("%Y-%m-%d")
     job_dir = settings.download_dir / run_date / job_id
     uploaded_files: list[Path] = []
@@ -52,7 +53,7 @@ async def run_job(
                 continue
 
             try:
-                await _process_row(job_id, row, token, job_dir, store, uploaded_files)
+                await _process_row(job_id, row, token, job_dir, store, uploaded_files, sheet_id)
             except AutomationError as exc:
                 _mark_failed(store, job_id, row["row_id"], exc.code, exc.message)
                 if exc.code == "TOKEN_EXPIRED":
@@ -91,6 +92,7 @@ async def _process_row(
     job_dir: Path,
     store: JobStore,
     uploaded_files: list[Path],
+    sheet_id: str = "",
 ) -> None:
     row_id = row["row_id"]
 
@@ -138,6 +140,7 @@ async def _process_row(
         token,
         int(row["sheet_row"]),
         upload.web_view_link,
+        sheet_id,
     )
 
     store.set_row_state(

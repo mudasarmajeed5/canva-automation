@@ -280,7 +280,7 @@ async def create_job(
 
     try:
         sheet_rows = await asyncio.to_thread(
-            sheets.append_rows, payload.google_access_token, payload.date, rows
+            sheets.append_rows, payload.google_access_token, payload.date, rows, payload.sheet_id
         )
     except AutomationError as exc:
         log.error("sheet append failed (%s)", exc.code)
@@ -299,7 +299,7 @@ async def create_job(
         )
 
     job_id = new_job_id()
-    store.create_job(job_id, payload.date, payload.requested_by, rows, sheet_rows)
+    store.create_job(job_id, payload.date, payload.requested_by, rows, sheet_rows, payload.sheet_id)
     remember_token(job_id, payload.google_access_token)
     worker.enqueue(job_id)
 
@@ -346,10 +346,11 @@ async def get_job(job_id: str, request: Request, _: None = Depends(require_secre
 async def get_sheet_rows(
     date: str,
     token: str,
+    sheet_id: str = "",
     _: None = Depends(require_secret),
 ) -> JSONResponse:
     try:
-        rows = await asyncio.to_thread(sheets.read_rows, token, date)
+        rows = await asyncio.to_thread(sheets.read_rows, token, date, sheet_id)
     except AutomationError as exc:
         return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
     except Exception:
@@ -369,7 +370,7 @@ async def create_sheet_rows(
     rows = [row.to_row_input() for row in payload.rows]
     try:
         sheet_rows = await asyncio.to_thread(
-            sheets.create_rows, payload.google_access_token, payload.date, rows
+            sheets.create_rows, payload.google_access_token, payload.date, rows, payload.sheet_id
         )
     except AutomationError as exc:
         return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
@@ -392,7 +393,9 @@ async def patch_sheet_rows(
 ) -> JSONResponse:
     updates = [u.model_dump(exclude_none=True) for u in payload.updates]
     try:
-        await asyncio.to_thread(sheets.update_rows, payload.google_access_token, updates)
+        await asyncio.to_thread(
+            sheets.update_rows, payload.google_access_token, updates, payload.sheet_id
+        )
     except AutomationError as exc:
         return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
     except Exception:
@@ -437,7 +440,7 @@ async def queue_download(
         sheet_rows[row_id] = item.row_number
 
     job_id = new_job_id()
-    store.create_job(job_id, payload.date, None, rows, sheet_rows)
+    store.create_job(job_id, payload.date, None, rows, sheet_rows, payload.sheet_id)
     remember_token(job_id, payload.google_access_token)
     worker.enqueue(job_id)
 
