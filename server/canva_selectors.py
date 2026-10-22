@@ -78,7 +78,7 @@ EDITOR_LOAD_TIMEOUT_MS = 60_000
 SHARE_BUTTON_TIMEOUT_MS = 45_000
 POPUP_TIMEOUT_MS = 30_000
 PANEL_TIMEOUT_MS = 30_000
-MIN_PANEL_WAIT_SECONDS = 3.0  # human observation: ~3 s before the final button
+MIN_PANEL_WAIT_SECONDS = 6.0  # human observation: ~3 s before the final button; doubled for slow loads
 DOWNLOAD_TIMEOUT_MS = int(
     os.getenv("CANVA_DOWNLOAD_TIMEOUT_MS", str(10 * 60 * 1000))
 )  # reels: Canva can spend minutes "preparing" before the download starts

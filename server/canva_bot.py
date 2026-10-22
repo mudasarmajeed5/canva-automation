@@ -333,7 +333,13 @@ def _open_download_panel(page: Page, share_button) -> None:
 
 
 def _confirm_download(page: Page):
+    # The final button often renders a few seconds after the panel markers;
+    # wait the panel settle time, then keep polling until it shows up.
     confirm = _find_confirm_button(page)
+    deadline = time.monotonic() + selectors.PANEL_TIMEOUT_MS / 1000
+    while confirm is None and time.monotonic() < deadline:
+        _pause(page, 250)
+        confirm = _find_confirm_button(page)
     if confirm is None:
         raise AutomationError(
             "CANVA_BUTTON_NOT_FOUND",
