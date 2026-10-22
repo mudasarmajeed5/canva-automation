@@ -273,8 +273,11 @@ class RowUpdate(BaseModel):
     @field_validator("status")
     @classmethod
     def _check_status(cls, value: str | None) -> str | None:
-        if value is not None and value not in STATUSES:
-            raise ValueError(f"status must be one of: {', '.join(STATUSES)}")
+        # Rows created before the current vocabulary may carry legacy statuses
+        # (e.g. "Done"); the UI only sends select options, so accept any
+        # non-empty short value instead of failing auto-save on old rows.
+        if value is not None and (not value.strip() or len(value) > 64):
+            raise ValueError("status must be a non-empty value of at most 64 characters")
         return value
 
 
