@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, Suspense, useCallback, useEffect, useState } from "react";
+import { FormEvent, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { signIn, signOut, useSession } from "next-auth/react";
 
@@ -17,7 +17,7 @@ const TASK_TYPES = [
   "Branding/Other",
 ] as const;
 
-const STATUSES = ["Done", "In Progress", "Completed"] as const;
+const STATUSES = ["Not Started", "In Progress", "Completed", "Blocked"] as const;
 
 type SheetRow = {
   row_number: number;
@@ -60,6 +60,8 @@ type ApiBody = {
   online?: boolean;
   job_id?: string;
   state?: string;
+  sheet_id?: string;
+  drive_folder_id?: string;
 };
 
 async function readJson(response: Response): Promise<ApiBody> {
@@ -83,8 +85,6 @@ function isValidCanvaLink(value: string): boolean {
   }
 }
 
-const SHEET_STORE = "canva.sheet.id";
-
 function today() {
   return new Intl.DateTimeFormat("en-GB", {
     day: "2-digit",
@@ -100,9 +100,15 @@ function defaultNewEntry(): NewEntry {
     account: ACCOUNTS[0][1],
     task_type: TASK_TYPES[0],
     task_description: "",
-    status: "Done",
+    status: "Not Started",
     canva_link: "",
   };
+}
+
+function statusOptions(current: string): string[] {
+  return STATUSES.includes(current as (typeof STATUSES)[number])
+    ? [...STATUSES]
+    : [...STATUSES, current];
 }
 
 function HomeContent() {
@@ -118,11 +124,15 @@ function HomeContent() {
   const [adding, setAdding] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [downloadingRow, setDownloadingRow] = useState<number | null>(null);
+  const [uploadAll, setUploadAll] = useState(false);
   const [revoking, setRevoking] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [automationOnline, setAutomationOnline] = useState<boolean | null>(null);
   const [sheetId, setSheetId] = useState("");
+  const [driveFolderId, setDriveFolderId] = useState("");
+  const settingsForEmail = useRef("");
+  const savedSettings = useRef({ sheet: "", folder: "" });
 
   const oauthError = searchParams.get("error") ?? "";
   const activeToken = session?.accessToken ?? "";
@@ -130,21 +140,40 @@ function HomeContent() {
   const sessionLoading = status === "loading";
 
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(SHEET_STORE);
-      if (stored) setSheetId(stored);
-    } catch {
-      /* storage unavailable */
-    }
-  }, []);
+    if (!activeEmail || settingsForEmail.current === activeEmail) return;
+    settingsForEmail.current = activeEmail;
+    let mounted = true;
+    (async () => {
+      try {
+        const response = await fetch(`/api/settings?email=${encodeURIComponent(activeEmail)}`);
+        const body = await readJson(response);
+        if (!mounted || !response.ok) return;
+        const nextSheet = (body.sheet_id ?? "").trim();
+        const nextFolder = (body.drive_folder_id ?? "").trim();
+        setSheetId(nextSheet);
+        setDriveFolderId(nextFolder);
+        savedSettings.current = { sheet: nextSheet, folder: nextFolder };
+      } catch {
+        /* backend unreachable — keep whatever is in the inputs */
+      }
+    })();
+    return () => { mounted = false; };
+  }, [activeEmail]);
 
-  function updateSheetId(value: string) {
-    setSheetId(value);
+  async function persistSettings() {
+    if (!activeEmail) return;
+    const sheet = sheetId.trim();
+    const folder = driveFolderId.trim();
+    if (savedSettings.current.sheet === sheet && savedSettings.current.folder === folder) return;
     try {
-      if (value.trim()) localStorage.setItem(SHEET_STORE, value.trim());
-      else localStorage.removeItem(SHEET_STORE);
+      const response = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: activeEmail, sheet_id: sheet, drive_folder_id: folder }),
+      });
+      if (response.ok) savedSettings.current = { sheet, folder };
     } catch {
-      /* storage unavailable */
+      /* retried on the next blur */
     }
   }
 
@@ -209,8 +238,11 @@ function HomeContent() {
   }, [job, fetchRows]);
 
   const dirtyCount = dirtyRows.size;
-  const activeJobRows = job?.rows.filter((r) => r.state !== "done" && r.state !== "failed").length ?? 0;
   const finishedRows = job?.rows.filter((r) => r.state === "done").length ?? 0;
+  const uploadableRows = rows.filter(
+    (r) => !r.post_link && (canvaLinks[r.row_number] ?? "").trim(),
+  );
+  const jobRunning = !!job && !["done", "done_with_errors", "failed"].includes(job.state);
 
   function updateNewEntry(index: number, patch: Partial<NewEntry>) {
     setNewEntries((cur) => cur.map((e, i) => (i === index ? { ...e, ...patch } : e)));
@@ -301,6 +333,7 @@ function HomeContent() {
               google_access_token: activeToken.trim(),
               date,
               sheet_id: sheetId.trim(),
+              drive_folder_id: driveFolderId.trim(),
               rows: downloadRows,
             }),
           });
@@ -393,6 +426,7 @@ function HomeContent() {
           google_access_token: activeToken.trim(),
           date,
           sheet_id: sheetId.trim(),
+          drive_folder_id: driveFolderId.trim(),
           rows: [
             {
               row_number: rowNumber,
@@ -411,6 +445,61 @@ function HomeContent() {
       setError(err instanceof Error ? err.message : "Could not queue download.");
     } finally {
       setDownloadingRow(null);
+    }
+  }
+
+  async function handleUploadAll() {
+    if (uploadAll || jobRunning) return;
+    if (!activeToken.trim()) {
+      setError("Connect Google first.");
+      return;
+    }
+    if (!sheetId.trim()) {
+      setError("Paste your Google Sheet ID first.");
+      return;
+    }
+    const items = uploadableRows.map((row) => ({
+      row_number: row.row_number,
+      account: row.account,
+      task_type: row.task_type,
+      canva_link: (canvaLinks[row.row_number] ?? "").trim(),
+    }));
+    if (!items.length) {
+      setError("Paste at least one Canva link on an undelivered row first.");
+      return;
+    }
+    const invalid = items.filter((item) => !isValidCanvaLink(item.canva_link));
+    if (invalid.length) {
+      setError(
+        `Row(s) ${invalid.map((i) => i.row_number).join(", ")}: Canva links must be https:// links on canva.com or canva.link.`,
+      );
+      return;
+    }
+    setError("");
+    setMessage("");
+    setUploadAll(true);
+    try {
+      const response = await fetch("/api/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          google_access_token: activeToken.trim(),
+          date,
+          sheet_id: sheetId.trim(),
+          drive_folder_id: driveFolderId.trim(),
+          rows: items,
+        }),
+      });
+      const body = await readJson(response);
+      if (!response.ok) throw new Error(body.message || body.error || "Could not queue the downloads.");
+      setJob({ job_id: body.job_id ?? "", state: body.state ?? "queued", rows: [] });
+      setMessage(
+        `Queued ${items.length} download${items.length === 1 ? "" : "s"} — each Drive link will land in its own row's Post Link.`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not queue the downloads.");
+    } finally {
+      setUploadAll(false);
     }
   }
 
@@ -480,12 +569,13 @@ function HomeContent() {
             Google Sheet ID
             <input
               value={sheetId}
-              onChange={(e) => updateSheetId(e.target.value)}
+              onChange={(e) => setSheetId(e.target.value)}
+              onBlur={persistSettings}
               placeholder="ID from the sheet URL — between /d/ and /edit"
               spellCheck={false}
             />
             <small>
-              Saved in this browser. Row 1 must contain: Date, Business/Account, Task Type,
+              Saved to your account. Row 1 must contain: Date, Business/Account, Task Type,
               Task Description, Status, Post Link.
               {sheetId.trim() && (
                 <>
@@ -496,6 +586,33 @@ function HomeContent() {
                     rel="noreferrer"
                   >
                     Open Sheet ↗
+                  </a>
+                </>
+              )}
+            </small>
+          </label>
+
+          <label className="date-field">
+            Google Drive folder ID
+            <input
+              value={driveFolderId}
+              onChange={(e) => setDriveFolderId(e.target.value)}
+              onBlur={persistSettings}
+              placeholder="Folder ID from the Drive URL — after /folders/"
+              spellCheck={false}
+            />
+            <small>
+              Downloads are uploaded into this folder&apos;s content subfolders (Carousel, Reel,
+              Meme…). Leave blank to use the server default folder.
+              {driveFolderId.trim() && (
+                <>
+                  {" "}
+                  <a
+                    href={`https://drive.google.com/drive/folders/${driveFolderId.trim()}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open Folder ↗
                   </a>
                 </>
               )}
@@ -645,6 +762,16 @@ function HomeContent() {
               </div>
               <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
                 {loadingRows && <span className="step-mark">LOADING…</span>}
+                {uploadableRows.length > 0 && (
+                  <button
+                    className="primary-button"
+                    onClick={handleUploadAll}
+                    disabled={uploadAll || jobRunning}
+                    style={{ padding: "0.5rem 1rem", fontSize: "0.85rem", whiteSpace: "nowrap" }}
+                  >
+                    {uploadAll ? "Queuing…" : `Upload all (${uploadableRows.length})`}
+                  </button>
+                )}
                 {dirtyCount > 0 && (
                   <button className="primary-button" onClick={handleSync} disabled={syncing} style={{ padding: "0.5rem 1rem", fontSize: "0.85rem" }}>
                     {syncing ? "Syncing…" : `Sync ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`}
@@ -676,7 +803,7 @@ function HomeContent() {
                         </label>
                         <label>Status
                           <select value={row.status} onChange={(e) => updateRow(row.row_number, "status", e.target.value)}>
-                            {STATUSES.map((v) => <option value={v} key={v}>{v}</option>)}
+                            {statusOptions(row.status).map((v) => <option value={v} key={v}>{v}</option>)}
                           </select>
                         </label>
                       </div>
@@ -705,7 +832,7 @@ function HomeContent() {
                           <button
                             type="button"
                             className="primary-button"
-                            disabled={!canvaLink.trim() || isDownloading || activeJobRows > 0}
+                            disabled={!canvaLink.trim() || isDownloading || jobRunning}
                             onClick={() => handleDownload(row.row_number)}
                             style={{ padding: "0.5rem 1rem", fontSize: "0.85rem", whiteSpace: "nowrap" }}
                           >

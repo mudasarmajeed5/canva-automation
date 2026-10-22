@@ -28,15 +28,27 @@ def clear_folder_cache() -> None:
     _folder_cache.clear()
 
 
-def upload_and_share(token: str, account: str, task_type: str, file: DownloadedFile) -> UploadResult:
+def upload_and_share(
+    token: str,
+    account: str,
+    task_type: str,
+    file: DownloadedFile,
+    root_folder_id: str = "",
+) -> UploadResult:
     if not token:
         raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
     if not file.path.exists():
         raise AutomationError("DRIVE_UPLOAD_FAILED", f"Local file does not exist: {file.path.name}")
 
     settings = get_settings()
+    root_id = root_folder_id.strip() or settings.root_folder_id
+    if not root_id:
+        raise AutomationError(
+            "DRIVE_FOLDER_MISSING",
+            "No Drive folder configured. Paste a Drive folder ID in the app or set ROOT_FOLDER_ID on the server.",
+        )
     service = build("drive", "v3", credentials=Credentials(token=token), cache_discovery=False)
-    business_id, business_name = _find_child(service, settings.root_folder_id, routing.account_keyword(account))
+    business_id, business_name = _find_child(service, root_id, routing.account_keyword(account))
     hint = routing.content_hint(file.name, task_type)
     warnings: list[str] = []
     if hint:

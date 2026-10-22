@@ -298,7 +298,7 @@ def _service(token: str):
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 
-def _header_map(service, spreadsheet_id: str, tab: str) -> dict[str, int]:
+def _header_map(service, tab: str, spreadsheet_id: str) -> dict[str, int]:
     values = _get_values(service, spreadsheet_id, _tab_range(tab, "1:1"))
     raw_headers = values[0] if values else []
     normalized = {str(value).strip().casefold(): index for index, value in enumerate(raw_headers)}

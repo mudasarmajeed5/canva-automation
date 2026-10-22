@@ -30,9 +30,9 @@ TASK_TYPES: tuple[str, ...] = (
     "Branding/Other",
 )
 
-STATUSES: tuple[str, ...] = ("Done", "In Progress", "Completed")
+STATUSES: tuple[str, ...] = ("Not Started", "In Progress", "Completed", "Blocked")
 
-DEFAULT_STATUS = "Done"
+DEFAULT_STATUS = "Not Started"
 
 ALLOWED_CANVA_HOSTS: frozenset[str] = frozenset({"canva.com", "www.canva.com", "canva.link"})
 
@@ -82,13 +82,14 @@ def is_valid_canva_link(value: str) -> bool:
 
 
 def normalize_sheet_id(value: str) -> str:
-    """Accept the raw ID from a Sheets URL; empty means 'use the server default'."""
+    """Accept the raw ID from a Google Sheets/Drive URL; empty means default."""
     value = value.strip()
     if not value:
         return ""
     if any(char.isspace() or char in "/?#&" for char in value):
         raise ValueError(
-            "sheet_id must be the raw ID from the sheet URL (the part between /d/ and /edit)"
+            "must be the raw Google file/folder ID from the URL "
+            "(the part between /d/ or /folders/ and the next slash) — not the full URL"
         )
     return value
 
@@ -206,9 +207,11 @@ class JobRequest(BaseModel):
     rows: list[RowIn] = Field(min_length=1)
     google_access_token: str = Field(min_length=10)
     sheet_id: str = ""
+    drive_folder_id: str = ""
     requested_by: str | None = None
 
     _check_sheet_id = field_validator("sheet_id")(normalize_sheet_id)
+    _check_drive_folder_id = field_validator("drive_folder_id")(normalize_sheet_id)
 
     @field_validator("date")
     @classmethod
@@ -341,8 +344,10 @@ class DownloadRequest(BaseModel):
     date: str
     rows: list[DownloadItem] = Field(min_length=1)
     sheet_id: str = ""
+    drive_folder_id: str = ""
 
     _check_sheet_id = field_validator("sheet_id")(normalize_sheet_id)
+    _check_drive_folder_id = field_validator("drive_folder_id")(normalize_sheet_id)
 
     @field_validator("date")
     @classmethod
@@ -350,3 +355,22 @@ class DownloadRequest(BaseModel):
         if not is_valid_sheet_date(value):
             raise ValueError("date must use the D-MMM-YYYY format, e.g. 21-Oct-2026")
         return value.strip()
+
+
+class UserSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    email: str = Field(min_length=3, max_length=320)
+    sheet_id: str = ""
+    drive_folder_id: str = ""
+
+    _check_sheet_id = field_validator("sheet_id")(normalize_sheet_id)
+    _check_drive_folder_id = field_validator("drive_folder_id")(normalize_sheet_id)
+
+    @field_validator("email")
+    @classmethod
+    def _check_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if "@" not in value or "." not in value.split("@")[-1]:
+            raise ValueError("email must be a valid email address")
+        return value

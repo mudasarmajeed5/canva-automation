@@ -24,7 +24,7 @@ def main() -> int:
     append.add_argument("--account", default="Excel Executive Cars")
     append.add_argument("--task-type", default="Video/Reel Editing")
     append.add_argument("--description", default="Sheets module acceptance test")
-    append.add_argument("--status", default="Done")
+    append.add_argument("--status", default="Not Started")
     append.add_argument("--canva-link", default="https://canva.link/sheets-module-test")
 
     setlink = subparsers.add_parser("setlink")

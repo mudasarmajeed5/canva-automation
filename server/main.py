@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import canva_bot
 import cleanup
 import sheets
+import user_settings
 from config import BASE_DIR, Settings, get_settings
 from jobs import JobStore, forget_all_tokens, new_job_id, remember_token
 from models import (
@@ -34,6 +35,7 @@ from models import (
     JobRequest,
     RowInput,
     UpdateRowsRequest,
+    UserSettingsRequest,
 )
 from worker import Worker
 
@@ -174,6 +176,7 @@ async def lifespan(app: FastAPI):
     finally:
         await worker.stop()
         store.close()
+        user_settings.close()
 
 
 app = FastAPI(title="Canva Automation", version="0.1.0", lifespan=lifespan)
@@ -299,7 +302,15 @@ async def create_job(
         )
 
     job_id = new_job_id()
-    store.create_job(job_id, payload.date, payload.requested_by, rows, sheet_rows, payload.sheet_id)
+    store.create_job(
+        job_id,
+        payload.date,
+        payload.requested_by,
+        rows,
+        sheet_rows,
+        payload.sheet_id,
+        payload.drive_folder_id,
+    )
     remember_token(job_id, payload.google_access_token)
     worker.enqueue(job_id)
 
@@ -340,6 +351,25 @@ async def get_job(job_id: str, request: Request, _: None = Depends(require_secre
 
 
 # --- Sheet row management endpoints -------------------------------------------
+
+
+@app.get("/api/settings")
+async def read_user_settings(
+    email: str,
+    _: None = Depends(require_secret),
+) -> JSONResponse:
+    if not email.strip():
+        return JSONResponse(status_code=400, content={"error": "email is required."})
+    return JSONResponse(status_code=200, content=user_settings.load(email))
+
+
+@app.put("/api/settings")
+async def write_user_settings(
+    payload: UserSettingsRequest,
+    _: None = Depends(require_secret),
+) -> JSONResponse:
+    saved = user_settings.save(payload.email, payload.sheet_id, payload.drive_folder_id)
+    return JSONResponse(status_code=200, content=saved)
 
 
 @app.get("/api/sheet-rows")
@@ -433,14 +463,22 @@ async def queue_download(
                 account=item.account,
                 task_type=item.task_type,
                 task_description="",
-                status="Done",
+                status="Not Started",
                 canva_link=item.canva_link,
             )
         )
         sheet_rows[row_id] = item.row_number
 
     job_id = new_job_id()
-    store.create_job(job_id, payload.date, None, rows, sheet_rows, payload.sheet_id)
+    store.create_job(
+        job_id,
+        payload.date,
+        None,
+        rows,
+        sheet_rows,
+        payload.sheet_id,
+        payload.drive_folder_id,
+    )
     remember_token(job_id, payload.google_access_token)
     worker.enqueue(job_id)
 

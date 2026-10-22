@@ -35,13 +35,14 @@ _TOKENS: dict[str, str] = {}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
-    job_id        TEXT PRIMARY KEY,
-    date          TEXT NOT NULL,
-    requested_by  TEXT,
-    sheet_id      TEXT NOT NULL DEFAULT '',
-    state         TEXT NOT NULL,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
+    job_id           TEXT PRIMARY KEY,
+    date             TEXT NOT NULL,
+    requested_by     TEXT,
+    sheet_id         TEXT NOT NULL DEFAULT '',
+    drive_folder_id  TEXT NOT NULL DEFAULT '',
+    state            TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS job_rows (
@@ -111,6 +112,10 @@ class JobStore:
                 self._conn.execute(
                     "ALTER TABLE jobs ADD COLUMN sheet_id TEXT NOT NULL DEFAULT ''"
                 )
+            if "drive_folder_id" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN drive_folder_id TEXT NOT NULL DEFAULT ''"
+                )
             self._conn.commit()
 
     def close(self) -> None:
@@ -127,13 +132,15 @@ class JobStore:
         rows: Iterable[RowInput],
         sheet_rows: dict[str, int],
         sheet_id: str = "",
+        drive_folder_id: str = "",
     ) -> None:
         now = utcnow_iso()
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO jobs (job_id, date, requested_by, sheet_id, state, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, 'queued', ?, ?)",
-                (job_id, sheet_date, requested_by, sheet_id, now, now),
+                "INSERT INTO jobs (job_id, date, requested_by, sheet_id, drive_folder_id, state,"
+                " created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
+                (job_id, sheet_date, requested_by, sheet_id, drive_folder_id, now, now),
             )
             for position, row in enumerate(rows):
                 self._conn.execute(
@@ -265,6 +272,7 @@ def _job_to_dict(job: sqlite3.Row, rows: Iterable[sqlite3.Row]) -> dict:
         "state": job["state"],
         "date": job["date"],
         "sheet_id": job["sheet_id"],
+        "drive_folder_id": job["drive_folder_id"],
         "created_at": job["created_at"],
         "updated_at": job["updated_at"],
         "rows": [
