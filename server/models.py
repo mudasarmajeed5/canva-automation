@@ -81,6 +81,24 @@ def is_valid_canva_link(value: str) -> bool:
     return hostname in ALLOWED_CANVA_HOSTS
 
 
+def sanitize_canva_link(value: str) -> str:
+    """Extract the URL from a messy clipboard paste.
+
+    Copying from Canva often includes the design title next to the link
+    (``https://canva.link/xyz Reading-Reel-9-Oct-2026``) or even before it.
+    Keep the whitespace-separated token that is actually a Canva link.
+    """
+    tokens = [
+        token.rstrip(")].,;:'\"\u00bb")
+        for token in value.split()
+        if token
+    ]
+    for token in tokens:
+        if is_valid_canva_link(token):
+            return token
+    return tokens[0] if tokens else ""
+
+
 def normalize_sheet_id(value: str) -> str:
     """Accept the raw ID from a Google Sheets/Drive URL; empty means default."""
     value = value.strip()
@@ -182,11 +200,12 @@ class RowIn(BaseModel):
     def _check_canva_link(cls, value: str) -> str:
         if not value:
             return ""
-        if not is_valid_canva_link(value):
+        link = sanitize_canva_link(value)
+        if not is_valid_canva_link(link):
             raise ValueError(
                 "canva_link must be an https link on canva.com, www.canva.com or canva.link"
             )
-        return value.strip()
+        return link
 
     def to_row_input(self) -> RowInput:
         return RowInput(
@@ -334,11 +353,12 @@ class DownloadItem(BaseModel):
     @field_validator("canva_link")
     @classmethod
     def _check_canva_link(cls, value: str) -> str:
-        if not is_valid_canva_link(value):
+        link = sanitize_canva_link(value)
+        if not is_valid_canva_link(link):
             raise ValueError(
                 "canva_link must be an https link on canva.com, www.canva.com or canva.link"
             )
-        return value.strip()
+        return link
 
 
 class DownloadRequest(BaseModel):

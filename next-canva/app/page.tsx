@@ -85,6 +85,14 @@ function isValidCanvaLink(value: string): boolean {
   }
 }
 
+function sanitizeCanvaLink(value: string): string {
+  const tokens = value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => t.replace(/[)\].,;:'"»]+$/, ""));
+  return tokens.find((t) => isValidCanvaLink(t)) ?? tokens[0] ?? "";
+}
+
 function today() {
   return new Intl.DateTimeFormat("en-GB", {
     day: "2-digit",
@@ -382,7 +390,10 @@ function HomeContent() {
       setError("Add a description for at least one task.");
       return;
     }
-    const badLink = valid.find((e) => e.canva_link.trim() && !isValidCanvaLink(e.canva_link.trim()));
+    const badLink = valid.find((e) => {
+      const link = sanitizeCanvaLink(e.canva_link);
+      return link && !isValidCanvaLink(link);
+    });
     if (badLink) {
       setError("Canva links must be https:// links on canva.com or canva.link.");
       return;
@@ -413,13 +424,17 @@ function HomeContent() {
 
       const rowNumbers = body.row_numbers ?? {};
       const downloadRows = valid
-        .map((entry, index) => ({ entry, rowNumber: rowNumbers[rowsPayload[index].row_id] }))
-        .filter((item) => item.entry.canva_link.trim() && typeof item.rowNumber === "number")
+        .map((entry, index) => ({
+          entry,
+          rowNumber: rowNumbers[rowsPayload[index].row_id],
+          link: sanitizeCanvaLink(entry.canva_link),
+        }))
+        .filter((item) => item.link && typeof item.rowNumber === "number")
         .map((item) => ({
           row_number: item.rowNumber as number,
           account: item.entry.account,
           task_type: item.entry.task_type,
-          canva_link: item.entry.canva_link.trim(),
+          canva_link: item.link,
         }));
 
       if (downloadRows.length) {
@@ -475,7 +490,7 @@ function HomeContent() {
 
   async function handleDownload(rowNumber: number) {
     const row = rows.find((r) => r.row_number === rowNumber);
-    const canvaLink = canvaLinks[rowNumber]?.trim();
+    const canvaLink = sanitizeCanvaLink(canvaLinks[rowNumber] ?? "");
     if (!row || !canvaLink || !activeToken.trim()) return;
     if (!sheetId.trim()) {
       setError("Paste your Google Sheet ID first.");
@@ -532,7 +547,7 @@ function HomeContent() {
       row_number: row.row_number,
       account: row.account,
       task_type: row.task_type,
-      canva_link: (canvaLinks[row.row_number] ?? "").trim(),
+      canva_link: sanitizeCanvaLink(canvaLinks[row.row_number] ?? ""),
     }));
     if (!items.length) {
       setError("Paste at least one Canva link on an undelivered row first.");
@@ -893,6 +908,12 @@ function HomeContent() {
                           <input
                             value={canvaLink}
                             onChange={(e) => updateCanvaLink(row.row_number, e.target.value)}
+                            onBlur={() => {
+                              const cleaned = sanitizeCanvaLink(canvaLink);
+                              if (cleaned && cleaned !== canvaLink) {
+                                updateCanvaLink(row.row_number, cleaned);
+                              }
+                            }}
                             placeholder="Paste Canva link to download…"
                             type="url"
                             style={{ flex: 1 }}
