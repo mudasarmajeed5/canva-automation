@@ -30,6 +30,9 @@ _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _A1_COLUMN_RE = re.compile(r"^[A-Z]+$")
 _UPDATED_RANGE_RE = re.compile(r"!([A-Z]+)(\d+)(?::[A-Z]+(\d+))?$")
 
+#: Continuation marker written in the Date column when a date block continues.
+CONTINUATION = "||"
+
 
 def _resolve_sheet_id(sheet_id: str | None) -> str:
     """Per-request Sheet ID, falling back to the server default from the env."""
@@ -61,7 +64,7 @@ def append_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
                 width,
                 headers,
                 {
-                    "Date": date,
+                    "Date": "",
                     "Business/Account": row.account,
                     "Task Type": row.task_type,
                     "Task Description": row.task_description,
@@ -70,30 +73,15 @@ def append_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
                 },
             )
         )
-
-    response = _execute(
-        lambda: service.spreadsheets()
-        .values()
-        .append(
-            spreadsheetId=sid,
-            range=_tab_range(settings.sheet_tab, "A1"),
-            valueInputOption=settings.date_input_mode,
-            insertDataOption="INSERT_ROWS",
-            includeValuesInResponse=False,
-            body={"values": values},
-        )
-    )
-    first_row = _first_row_from_updated_range(response.get("updates", {}).get("updatedRange", ""))
-    if first_row is None:
-        raise AutomationError(
-            "SHEET_APPEND_FAILED",
-            "Google Sheets did not return the range of the appended rows.",
-        )
-    return {row.row_id: first_row + index for index, row in enumerate(rows)}
+    return _append_block(service, sid, settings, headers, width, date, rows, values)
 
 
 def read_rows(token: str, date: str, sheet_id: str = "") -> list[dict]:
-    """Read all data rows matching ``date`` from the Sheet."""
+    """Read the date block for ``date`` from the Sheet.
+
+    A block starts at the first row whose Date cell equals ``date`` and runs
+    until the next row that carries a different date.
+    """
     if not token:
         raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
 
@@ -103,23 +91,18 @@ def read_rows(token: str, date: str, sheet_id: str = "") -> list[dict]:
     headers = _header_map(service, settings.sheet_tab, sid)
     width = max(headers.values()) + 1
 
-    values = _get_values(service, sid, _tab_range(settings.sheet_tab, f"A2:{_column_letter(width - 1)}"))
+    cells = _data_cells(service, sid, settings.sheet_tab, width)
     rows: list[dict] = []
-    for index, row_values in enumerate(values):
-        sheet_row = index + 2
-        cells = list(row_values) + [""] * (width - len(row_values))
-        row_date = str(cells[headers["Date"]]).strip()
-        if row_date != date:
-            continue
+    for sheet_row, row in _block_rows(cells, headers, date):
         rows.append(
             {
                 "row_number": sheet_row,
-                "date": row_date,
-                "account": str(cells[headers["Business/Account"]]).strip(),
-                "task_type": str(cells[headers["Task Type"]]).strip(),
-                "task_description": str(cells[headers["Task Description"]]).strip(),
-                "status": str(cells[headers["Status"]]).strip(),
-                "post_link": str(cells[headers["Post Link"]]).strip(),
+                "date": date,
+                "account": row[headers["Business/Account"]].strip(),
+                "task_type": row[headers["Task Type"]].strip(),
+                "task_description": row[headers["Task Description"]].strip(),
+                "status": row[headers["Status"]].strip(),
+                "post_link": row[headers["Post Link"]].strip(),
             }
         )
     return rows
@@ -144,7 +127,7 @@ def create_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
                 width,
                 headers,
                 {
-                    "Date": date,
+                    "Date": "",
                     "Business/Account": row.account,
                     "Task Type": row.task_type,
                     "Task Description": row.task_description,
@@ -153,7 +136,159 @@ def create_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
                 },
             )
         )
+    return _append_block(service, sid, settings, headers, width, date, rows, values)
 
+
+def update_rows(token: str, updates: list[dict], sheet_id: str = "") -> None:
+    """Batch-update individual cells in existing rows.
+
+    Only the changed cells are written, so existing Date and Post Link values
+    are never overwritten. A Date cell that a past sync wiped is restored from
+    the update's supplied date (only when the cell is empty).
+    """
+    if not token:
+        raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
+    if not updates:
+        return
+
+    settings = get_settings()
+    sid = _resolve_sheet_id(sheet_id)
+    service = _service(token)
+    headers = _header_map(service, settings.sheet_tab, sid)
+
+    field_to_header = {
+        "account": "Business/Account",
+        "task_type": "Task Type",
+        "task_description": "Task Description",
+        "status": "Status",
+    }
+
+    date_column = _column_letter(headers["Date"])
+    date_cells = _get_values(
+        service, sid, _tab_range(settings.sheet_tab, f"{date_column}2:{date_column}")
+    )
+
+    data: list[dict] = []
+    for update in updates:
+        row_number = update["row_number"]
+        if row_number < 2:
+            raise AutomationError("SHEET_ROW_NOT_FOUND", f"Invalid row number: {row_number}")
+        for field, header in field_to_header.items():
+            value = update.get(field)
+            if value is None:
+                continue
+            column = _column_letter(headers[header])
+            data.append(
+                {
+                    "range": _tab_range(settings.sheet_tab, f"{column}{row_number}"),
+                    "values": [[value]],
+                }
+            )
+        # Repair only: restore the Date cell when an earlier buggy sync wiped it.
+        supplied_date = update.get("date")
+        if supplied_date:
+            index = row_number - 2
+            current = _cell_value(date_cells[index : index + 1]) if index < len(date_cells) else ""
+            if not current:
+                data.append(
+                    {
+                        "range": _tab_range(settings.sheet_tab, f"{date_column}{row_number}"),
+                        "values": [[supplied_date]],
+                    }
+                )
+
+    if not data:
+        return
+    _execute(
+        lambda: service.spreadsheets()
+        .values()
+        .batchUpdate(
+            spreadsheetId=sid,
+            body={"valueInputOption": "RAW", "data": data},
+        )
+    )
+
+
+def _append_block(
+    service,
+    sid: str,
+    settings,
+    headers: dict[str, int],
+    width: int,
+    date: str,
+    rows: list[RowInput],
+    values: list[list[str]],
+) -> dict[str, int]:
+    """Place ``values`` into ``date``'s block.
+
+    The first row of a brand-new block carries the Date; every later row gets
+    the '||' continuation marker so a date appears only once per block. When
+    the block already exists, new rows join it — at the end of the sheet when
+    the block is last, or inserted directly after it when a later date block
+    follows.
+    """
+    dates = [
+        row[headers["Date"]].strip()
+        for row in _data_cells(service, sid, settings.sheet_tab, width)
+    ]
+    bounds = _date_block_bounds(dates, date)
+
+    if bounds is None:
+        values[0][headers["Date"]] = date
+        for value_row in values[1:]:
+            value_row[headers["Date"]] = CONTINUATION
+        return _append_values(service, sid, settings, rows, values)
+
+    _start, end = bounds
+    for value_row in values:
+        value_row[headers["Date"]] = CONTINUATION
+
+    if end >= len(dates) - 1:
+        return _append_values(service, sid, settings, rows, values)
+
+    first_row = end + 3
+    count = len(values)
+    sheet_id_num = _numeric_sheet_id(service, sid, settings.sheet_tab)
+    _execute(
+        lambda: service.spreadsheets()
+        .batchUpdate(
+            spreadsheetId=sid,
+            body={
+                "requests": [
+                    {
+                        "insertDimension": {
+                            "range": {
+                                "sheetId": sheet_id_num,
+                                "dimension": "ROWS",
+                                "startIndex": first_row - 1,
+                                "endIndex": first_row - 1 + count,
+                            },
+                            "inheritBefore": True,
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    _execute(
+        lambda: service.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=sid,
+            range=_tab_range(
+                settings.sheet_tab,
+                f"A{first_row}:{_column_letter(width - 1)}{first_row + count - 1}",
+            ),
+            valueInputOption=settings.date_input_mode,
+            body={"values": values},
+        )
+    )
+    return {row.row_id: first_row + index for index, row in enumerate(rows)}
+
+
+def _append_values(
+    service, sid: str, settings, rows: list[RowInput], values: list[list[str]]
+) -> dict[str, int]:
     response = _execute(
         lambda: service.spreadsheets()
         .values()
@@ -175,52 +310,67 @@ def create_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
     return {row.row_id: first_row + index for index, row in enumerate(rows)}
 
 
-def update_rows(token: str, updates: list[dict], sheet_id: str = "") -> None:
-    """Batch-update cells in existing rows. Does not touch Post Link."""
-    if not token:
-        raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
-    if not updates:
-        return
+def _date_block_bounds(dates: list[str], target: str) -> tuple[int, int] | None:
+    """0-based ``[start, end]`` of ``target``'s block, or None when absent.
 
-    settings = get_settings()
-    sid = _resolve_sheet_id(sheet_id)
-    service = _service(token)
-    headers = _header_map(service, settings.sheet_tab, sid)
-    width = max(headers.values()) + 1
+    The block starts at the first row whose Date equals ``target`` and ends
+    just before the next row carrying any other non-empty date value; '||'
+    continuation markers and empty cells stay inside the block.
+    """
+    start: int | None = None
+    for index, cell in enumerate(dates):
+        if start is None:
+            if cell == target:
+                start = index
+            continue
+        if cell and cell != target and cell != CONTINUATION:
+            return start, index - 1
+    return (start, len(dates) - 1) if start is not None else None
 
-    field_to_header = {
-        "account": "Business/Account",
-        "task_type": "Task Type",
-        "task_description": "Task Description",
-        "status": "Status",
-    }
 
-    for update in updates:
-        row_number = update["row_number"]
-        if row_number < 2:
-            raise AutomationError("SHEET_ROW_NOT_FOUND", f"Invalid row number: {row_number}")
+def _block_rows(
+    cells: list[list[str]], headers: dict[str, int], target: str
+) -> list[tuple[int, list[str]]]:
+    """``(sheet_row, cells)`` for the content rows of ``target``'s block."""
+    dates = [row[headers["Date"]].strip() for row in cells]
+    bounds = _date_block_bounds(dates, target)
+    if bounds is None:
+        return []
+    start, end = bounds
+    content_columns = [
+        headers["Business/Account"],
+        headers["Task Type"],
+        headers["Task Description"],
+        headers["Status"],
+        headers["Post Link"],
+    ]
+    rows: list[tuple[int, list[str]]] = []
+    for index in range(start, end + 1):
+        row = cells[index]
+        if not any(row[column].strip() for column in content_columns):
+            continue
+        rows.append((index + 2, row))
+    return rows
 
-        values_map: dict[str, str] = {"Date": ""}
-        for field, header in field_to_header.items():
-            value = update.get(field)
-            if value is not None:
-                values_map[header] = value
 
-        row_vals = [""] * width
-        for header, value in values_map.items():
-            if header in headers and value:
-                row_vals[headers[header]] = value
+def _data_cells(service, spreadsheet_id: str, tab: str, width: int) -> list[list[str]]:
+    """All data rows (from row 2), padded to ``width`` columns."""
+    values = _get_values(
+        service, spreadsheet_id, _tab_range(tab, f"A2:{_column_letter(width - 1)}")
+    )
+    return [list(row_values) + [""] * (width - len(row_values)) for row_values in values]
 
-        _execute(
-            lambda rn=row_number, rv=row_vals: service.spreadsheets()
-            .values()
-            .update(
-                spreadsheetId=sid,
-                range=_tab_range(settings.sheet_tab, f"A{rn}:{_column_letter(width - 1)}{rn}"),
-                valueInputOption="RAW",
-                body={"values": [rv]},
-            )
-        )
+
+def _numeric_sheet_id(service, spreadsheet_id: str, tab: str) -> int:
+    meta = _execute(
+        lambda: service.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets(properties(sheetId,title))")
+    )
+    for sheet in meta.get("sheets", []):
+        properties = sheet.get("properties", {})
+        if properties.get("title") == tab:
+            return int(properties["sheetId"])
+    raise AutomationError("SHEET_NOT_FOUND", f"Sheet tab {tab!r} was not found.")
 
 
 def set_drive_link(token: str, row_number: int, drive_url: str, sheet_id: str = "") -> None:

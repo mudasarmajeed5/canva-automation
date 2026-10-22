@@ -254,6 +254,7 @@ class RowUpdate(BaseModel):
     task_type: str | None = None
     task_description: str | None = None
     status: str | None = None
+    date: str | None = None
 
     @field_validator("account")
     @classmethod

@@ -133,6 +133,10 @@ function HomeContent() {
   const [driveFolderId, setDriveFolderId] = useState("");
   const settingsForEmail = useRef("");
   const savedSettings = useRef({ sheet: "", folder: "" });
+  const rowsRef = useRef<SheetRow[]>([]);
+  const dirtyStamp = useRef(new Map<number, number>());
+  const autoSyncTimer = useRef<number | null>(null);
+  const syncingRef = useRef(false);
 
   const oauthError = searchParams.get("error") ?? "";
   const activeToken = session?.accessToken ?? "";
@@ -199,8 +203,11 @@ function HomeContent() {
       const response = await fetch(`/api/sheet-rows?${params}`);
       const body = await readJson(response);
       if (!response.ok) throw new Error(body.message || body.error || "Could not load rows.");
-      setRows(body.rows || []);
-      setDirtyRows(new Set());
+      const nextRows = body.rows || [];
+      rowsRef.current = nextRows;
+      setRows(nextRows);
+      cancelAutoSync();
+      resetDirty();
       const links: Record<number, string> = {};
       for (const row of body.rows || []) {
         if (!row.post_link) links[row.row_number] = "";
@@ -256,11 +263,102 @@ function HomeContent() {
     setNewEntries((cur) => (cur.length === 1 ? cur : cur.filter((_, i) => i !== index)));
   }
 
+  function cancelAutoSync() {
+    if (autoSyncTimer.current !== null) {
+      clearTimeout(autoSyncTimer.current);
+      autoSyncTimer.current = null;
+    }
+  }
+
+  function resetDirty() {
+    dirtyStamp.current.clear();
+    setDirtyRows(new Set());
+  }
+
+  function markDirty(rowNumber: number) {
+    dirtyStamp.current.set(rowNumber, (dirtyStamp.current.get(rowNumber) ?? 0) + 1);
+    setDirtyRows(new Set(dirtyStamp.current.keys()));
+  }
+
+  function clearDirtyIfUnchanged(snapshot: Map<number, number>) {
+    let changed = false;
+    for (const [rowNumber, stamp] of snapshot) {
+      if (dirtyStamp.current.get(rowNumber) === stamp) {
+        dirtyStamp.current.delete(rowNumber);
+        changed = true;
+      }
+    }
+    if (changed) setDirtyRows(new Set(dirtyStamp.current.keys()));
+  }
+
+  function scheduleAutoSync() {
+    cancelAutoSync();
+    autoSyncTimer.current = window.setTimeout(() => {
+      autoSyncTimer.current = null;
+      void flushDirty();
+    }, 900);
+  }
+
+  async function flushDirty(): Promise<boolean> {
+    if (syncingRef.current || !dirtyStamp.current.size) return true;
+    if (!activeToken.trim() || !sheetId.trim()) return false;
+    const snapshot = new Map(dirtyStamp.current);
+    syncingRef.current = true;
+    setSyncing(true);
+    let ok = false;
+    try {
+      const updates = Array.from(snapshot.keys())
+        .sort((a, b) => a - b)
+        .map((rowNumber) => {
+          const row = rowsRef.current.find((r) => r.row_number === rowNumber);
+          if (!row) return null;
+          return {
+            row_number: rowNumber,
+            account: row.account,
+            task_type: row.task_type,
+            task_description: row.task_description,
+            status: row.status,
+            date,
+          };
+        })
+        .filter((u): u is NonNullable<typeof u> => u !== null);
+      if (updates.length) {
+        const response = await fetch("/api/sheet-rows", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            google_access_token: activeToken.trim(),
+            sheet_id: sheetId.trim(),
+            updates,
+          }),
+        });
+        const body = await readJson(response);
+        if (!response.ok) throw new Error(body.message || body.error || "Could not sync.");
+        clearDirtyIfUnchanged(snapshot);
+        setMessage(`Synced ${body.updated} row${body.updated === 1 ? "" : "s"} to Sheet.`);
+        ok = true;
+      } else {
+        resetDirty();
+        ok = true;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not sync.");
+    } finally {
+      syncingRef.current = false;
+      setSyncing(false);
+    }
+    if (ok && dirtyStamp.current.size) scheduleAutoSync();
+    return ok;
+  }
+
   function updateRow(rowNumber: number, field: keyof SheetRow, value: string) {
-    setRows((cur) =>
-      cur.map((r) => (r.row_number === rowNumber ? { ...r, [field]: value } : r)),
-    );
-    setDirtyRows((cur) => new Set(cur).add(rowNumber));
+    setRows((cur) => {
+      const next = cur.map((r) => (r.row_number === rowNumber ? { ...r, [field]: value } : r));
+      rowsRef.current = next;
+      return next;
+    });
+    markDirty(rowNumber);
+    scheduleAutoSync();
   }
 
   function updateCanvaLink(rowNumber: number, value: string) {
@@ -371,36 +469,8 @@ function HomeContent() {
     }
     setError("");
     setMessage("");
-    setSyncing(true);
-    try {
-      const updates = Array.from(dirtyRows).map((rowNumber) => {
-        const row = rows.find((r) => r.row_number === rowNumber)!;
-        return {
-          row_number: rowNumber,
-          account: row.account,
-          task_type: row.task_type,
-          task_description: row.task_description,
-          status: row.status,
-        };
-      });
-      const response = await fetch("/api/sheet-rows", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          google_access_token: activeToken.trim(),
-          sheet_id: sheetId.trim(),
-          updates,
-        }),
-      });
-      const body = await readJson(response);
-      if (!response.ok) throw new Error(body.message || body.error || "Could not sync.");
-      setMessage(`Synced ${body.updated} row${body.updated === 1 ? "" : "s"} to Sheet.`);
-      setDirtyRows(new Set());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not sync.");
-    } finally {
-      setSyncing(false);
-    }
+    cancelAutoSync();
+    await flushDirty();
   }
 
   async function handleDownload(rowNumber: number) {
@@ -536,10 +606,7 @@ function HomeContent() {
       <header className="masthead">
         <div>
           <p className="eyebrow">CANVA → DRIVE / CONTROL DESK</p>
-          <h1>Move the work,<br /><em>not the links.</em></h1>
-          <p className="intro">
-            Add tasks, sync to Sheet, then paste Canva links to download and deliver to Drive.
-          </p>
+          <h1>Move the work, <em>not the links.</em></h1>
         </div>
         <div className={`status-pill ${automationOnline ? "is-ready" : ""}`}>
           <span className="status-dot" />
@@ -559,65 +626,67 @@ function HomeContent() {
             <span className="step-mark">01 / INPUT</span>
           </div>
 
-          <label className="date-field">
-            Calendar date
-            <input value={date} onChange={(e) => setDate(e.target.value)} placeholder="21-Oct-2026" required />
-            <small>Tasks are added to and loaded from the Sheet for this date.</small>
-          </label>
+          <div className="field-grid">
+            <label className="date-field">
+              Calendar date
+              <input value={date} onChange={(e) => setDate(e.target.value)} placeholder="21-Oct-2026" required />
+              <small>Tasks are added to and loaded from the Sheet for this date.</small>
+            </label>
 
-          <label className="date-field">
-            Google Sheet ID
-            <input
-              value={sheetId}
-              onChange={(e) => setSheetId(e.target.value)}
-              onBlur={persistSettings}
-              placeholder="ID from the sheet URL — between /d/ and /edit"
-              spellCheck={false}
-            />
-            <small>
-              Saved to your account. Row 1 must contain: Date, Business/Account, Task Type,
-              Task Description, Status, Post Link.
-              {sheetId.trim() && (
-                <>
-                  {" "}
-                  <a
-                    href={`https://docs.google.com/spreadsheets/d/${sheetId.trim()}/edit`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open Sheet ↗
-                  </a>
-                </>
-              )}
-            </small>
-          </label>
+            <label className="date-field">
+              Google Sheet ID
+              <input
+                value={sheetId}
+                onChange={(e) => setSheetId(e.target.value)}
+                onBlur={persistSettings}
+                placeholder="ID from the sheet URL — between /d/ and /edit"
+                spellCheck={false}
+              />
+              <small>
+                Saved to your account. Row 1 must contain: Date, Business/Account, Task Type,
+                Task Description, Status, Post Link.
+                {sheetId.trim() && (
+                  <>
+                    {" "}
+                    <a
+                      href={`https://docs.google.com/spreadsheets/d/${sheetId.trim()}/edit`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open Sheet ↗
+                    </a>
+                  </>
+                )}
+              </small>
+            </label>
 
-          <label className="date-field">
-            Google Drive folder ID
-            <input
-              value={driveFolderId}
-              onChange={(e) => setDriveFolderId(e.target.value)}
-              onBlur={persistSettings}
-              placeholder="Folder ID from the Drive URL — after /folders/"
-              spellCheck={false}
-            />
-            <small>
-              Downloads are uploaded into this folder&apos;s content subfolders (Carousel, Reel,
-              Meme…). Leave blank to use the server default folder.
-              {driveFolderId.trim() && (
-                <>
-                  {" "}
-                  <a
-                    href={`https://drive.google.com/drive/folders/${driveFolderId.trim()}`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open Folder ↗
-                  </a>
-                </>
-              )}
-            </small>
-          </label>
+            <label className="date-field">
+              Google Drive folder ID
+              <input
+                value={driveFolderId}
+                onChange={(e) => setDriveFolderId(e.target.value)}
+                onBlur={persistSettings}
+                placeholder="Folder ID from the Drive URL — after /folders/"
+                spellCheck={false}
+              />
+              <small>
+                Downloads are uploaded into this folder&apos;s content subfolders (Carousel, Reel,
+                Meme…). Leave blank to use the server default folder.
+                {driveFolderId.trim() && (
+                  <>
+                    {" "}
+                    <a
+                      href={`https://drive.google.com/drive/folders/${driveFolderId.trim()}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open Folder ↗
+                    </a>
+                  </>
+                )}
+              </small>
+            </label>
+          </div>
 
           <form onSubmit={handleAdd}>
             <div className="links-heading">
@@ -754,7 +823,7 @@ function HomeContent() {
       {rows.length > 0 && (
         <>
           <div className="rule" />
-          <section className="card" style={{ marginTop: "1.5rem" }}>
+          <section className="card" style={{ marginTop: "1rem" }}>
             <div className="card-heading">
               <div>
                 <p className="section-label">Existing tasks</p>
@@ -774,7 +843,7 @@ function HomeContent() {
                 )}
                 {dirtyCount > 0 && (
                   <button className="primary-button" onClick={handleSync} disabled={syncing} style={{ padding: "0.5rem 1rem", fontSize: "0.85rem" }}>
-                    {syncing ? "Syncing…" : `Sync ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`}
+                    {syncing ? "Saving…" : `Sync ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`}
                   </button>
                 )}
                 <span className="count">{rows.length} row{rows.length === 1 ? "" : "s"}</span>
@@ -841,7 +910,7 @@ function HomeContent() {
                         </div>
                       )}
                       {dirtyRows.has(row.row_number) && (
-                        <small style={{ opacity: 0.6 }}>Edited — click Sync to save</small>
+                        <small style={{ opacity: 0.6 }}>{syncing ? "Saving to Sheet…" : "Auto-saving…"}</small>
                       )}
                     </div>
                   </div>
