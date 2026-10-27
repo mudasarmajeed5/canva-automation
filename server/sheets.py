@@ -55,7 +55,8 @@ def append_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
     settings = get_settings()
     sid = _resolve_sheet_id(sheet_id)
     service = _service(token)
-    headers = _header_map(service, settings.sheet_tab, sid)
+    tab = _resolve_tab(service, sid, settings.sheet_tab)
+    headers = _header_map(service, tab, sid)
     width = max(headers.values()) + 1
     values = []
     for row in rows:
@@ -73,7 +74,7 @@ def append_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
                 },
             )
         )
-    return _append_block(service, sid, settings, headers, width, date, rows, values)
+    return _append_block(service, sid, settings, tab, headers, width, date, rows, values)
 
 
 def read_rows(token: str, date: str, sheet_id: str = "") -> list[dict]:
@@ -88,10 +89,11 @@ def read_rows(token: str, date: str, sheet_id: str = "") -> list[dict]:
     settings = get_settings()
     sid = _resolve_sheet_id(sheet_id)
     service = _service(token)
-    headers = _header_map(service, settings.sheet_tab, sid)
+    tab = _resolve_tab(service, sid, settings.sheet_tab)
+    headers = _header_map(service, tab, sid)
     width = max(headers.values()) + 1
 
-    cells = _data_cells(service, sid, settings.sheet_tab, width)
+    cells = _data_cells(service, sid, tab, width)
     rows: list[dict] = []
     for sheet_row, row in _block_rows(cells, headers, date):
         rows.append(
@@ -118,7 +120,8 @@ def create_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
     settings = get_settings()
     sid = _resolve_sheet_id(sheet_id)
     service = _service(token)
-    headers = _header_map(service, settings.sheet_tab, sid)
+    tab = _resolve_tab(service, sid, settings.sheet_tab)
+    headers = _header_map(service, tab, sid)
     width = max(headers.values()) + 1
     values = []
     for row in rows:
@@ -136,7 +139,7 @@ def create_rows(token: str, date: str, rows: list[RowInput], sheet_id: str = "")
                 },
             )
         )
-    return _append_block(service, sid, settings, headers, width, date, rows, values)
+    return _append_block(service, sid, settings, tab, headers, width, date, rows, values)
 
 
 def update_rows(token: str, updates: list[dict], sheet_id: str = "") -> None:
@@ -154,7 +157,8 @@ def update_rows(token: str, updates: list[dict], sheet_id: str = "") -> None:
     settings = get_settings()
     sid = _resolve_sheet_id(sheet_id)
     service = _service(token)
-    headers = _header_map(service, settings.sheet_tab, sid)
+    tab = _resolve_tab(service, sid, settings.sheet_tab)
+    headers = _header_map(service, tab, sid)
 
     field_to_header = {
         "account": "Business/Account",
@@ -165,7 +169,7 @@ def update_rows(token: str, updates: list[dict], sheet_id: str = "") -> None:
 
     date_column = _column_letter(headers["Date"])
     date_cells = _get_values(
-        service, sid, _tab_range(settings.sheet_tab, f"{date_column}2:{date_column}")
+        service, sid, _tab_range(tab, f"{date_column}2:{date_column}")
     )
 
     data: list[dict] = []
@@ -180,7 +184,7 @@ def update_rows(token: str, updates: list[dict], sheet_id: str = "") -> None:
             column = _column_letter(headers[header])
             data.append(
                 {
-                    "range": _tab_range(settings.sheet_tab, f"{column}{row_number}"),
+                    "range": _tab_range(tab, f"{column}{row_number}"),
                     "values": [[value]],
                 }
             )
@@ -192,7 +196,7 @@ def update_rows(token: str, updates: list[dict], sheet_id: str = "") -> None:
             if not current:
                 data.append(
                     {
-                        "range": _tab_range(settings.sheet_tab, f"{date_column}{row_number}"),
+                        "range": _tab_range(tab, f"{date_column}{row_number}"),
                         "values": [[supplied_date]],
                     }
                 )
@@ -213,6 +217,7 @@ def _append_block(
     service,
     sid: str,
     settings,
+    tab: str,
     headers: dict[str, int],
     width: int,
     date: str,
@@ -229,7 +234,7 @@ def _append_block(
     """
     dates = [
         row[headers["Date"]].strip()
-        for row in _data_cells(service, sid, settings.sheet_tab, width)
+        for row in _data_cells(service, sid, tab, width)
     ]
     bounds = _date_block_bounds(dates, date)
 
@@ -237,18 +242,18 @@ def _append_block(
         values[0][headers["Date"]] = date
         for value_row in values[1:]:
             value_row[headers["Date"]] = CONTINUATION
-        return _append_values(service, sid, settings, rows, values)
+        return _append_values(service, sid, settings, tab, rows, values)
 
     _start, end = bounds
     for value_row in values:
         value_row[headers["Date"]] = CONTINUATION
 
     if end >= len(dates) - 1:
-        return _append_values(service, sid, settings, rows, values)
+        return _append_values(service, sid, settings, tab, rows, values)
 
     first_row = end + 3
     count = len(values)
-    sheet_id_num = _numeric_sheet_id(service, sid, settings.sheet_tab)
+    sheet_id_num = _numeric_sheet_id(service, sid, tab)
     _execute(
         lambda: service.spreadsheets()
         .batchUpdate(
@@ -276,7 +281,7 @@ def _append_block(
         .update(
             spreadsheetId=sid,
             range=_tab_range(
-                settings.sheet_tab,
+                tab,
                 f"A{first_row}:{_column_letter(width - 1)}{first_row + count - 1}",
             ),
             valueInputOption=settings.date_input_mode,
@@ -286,27 +291,40 @@ def _append_block(
     return {row.row_id: first_row + index for index, row in enumerate(rows)}
 
 
+def _last_used_row(service, spreadsheet_id: str, tab: str) -> int:
+    """1-based sheet row of the last cell with any content (header counts).
+
+    Google's values.append(range=A1) stops at the first empty row inside the
+    "table" starting at A1, which can insert mid-sheet. Scanning the whole
+    grid gives the true end so new rows always land after it.
+    """
+    values = _get_values(service, spreadsheet_id, _tab_range(tab, "A:Z"))
+    last = 1
+    for index, row_values in enumerate(values, start=1):
+        if any(str(cell).strip() for cell in row_values):
+            last = index
+    return last
+
+
 def _append_values(
-    service, sid: str, settings, rows: list[RowInput], values: list[list[str]]
+    service, sid: str, settings, tab: str, rows: list[RowInput], values: list[list[str]]
 ) -> dict[str, int]:
-    response = _execute(
+    """Write rows at the first empty row after the sheet's true last content row."""
+    if not rows:
+        return {}
+    first_row = _last_used_row(service, sid, tab) + 1
+    width = max(len(value_row) for value_row in values)
+    last_col = _column_letter(width - 1)
+    _execute(
         lambda: service.spreadsheets()
         .values()
-        .append(
+        .update(
             spreadsheetId=sid,
-            range=_tab_range(settings.sheet_tab, "A1"),
+            range=_tab_range(tab, f"A{first_row}:{last_col}{first_row + len(values) - 1}"),
             valueInputOption=settings.date_input_mode,
-            insertDataOption="INSERT_ROWS",
-            includeValuesInResponse=False,
             body={"values": values},
         )
     )
-    first_row = _first_row_from_updated_range(response.get("updates", {}).get("updatedRange", ""))
-    if first_row is None:
-        raise AutomationError(
-            "SHEET_APPEND_FAILED",
-            "Google Sheets did not return the range of the appended rows.",
-        )
     return {row.row_id: first_row + index for index, row in enumerate(rows)}
 
 
@@ -374,7 +392,12 @@ def _numeric_sheet_id(service, spreadsheet_id: str, tab: str) -> int:
 
 
 def set_drive_link(token: str, row_number: int, drive_url: str, sheet_id: str = "") -> None:
-    """Write the Drive share URL to the Post Link column at the given row."""
+    """Write the Drive share URL to the Post Link column at the given row.
+
+    The cell is written as a native Drive smart chip (file chip). If the chip
+    write is rejected, the plain URL is written instead so uploads never fail
+    over a cosmetic difference.
+    """
     if not token:
         raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
     if row_number < 2:
@@ -383,17 +406,51 @@ def set_drive_link(token: str, row_number: int, drive_url: str, sheet_id: str = 
     settings = get_settings()
     sid = _resolve_sheet_id(sheet_id)
     service = _service(token)
-    headers = _header_map(service, settings.sheet_tab, sid)
+    tab = _resolve_tab(service, sid, settings.sheet_tab)
+    headers = _header_map(service, tab, sid)
     post_column = _column_letter(headers["Post Link"])
+
+    try:
+        _write_drive_chip(service, sid, tab, row_number, headers["Post Link"], drive_url)
+        return
+    except AutomationError as exc:
+        log.warning("Drive chip write failed (%s); falling back to a plain link", exc.code)
 
     _execute(
         lambda: service.spreadsheets()
         .values()
         .update(
             spreadsheetId=sid,
-            range=_tab_range(settings.sheet_tab, f"{post_column}{row_number}"),
+            range=_tab_range(tab, f"{post_column}{row_number}"),
             valueInputOption="RAW",
             body={"values": [[drive_url]]},
+        )
+    )
+
+
+def set_status(
+    token: str, row_number: int, status: str, sheet_id: str = ""
+) -> None:
+    """Write the Status cell for a row (used to mark uploads Done)."""
+    if not token:
+        raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
+    if row_number < 2:
+        raise AutomationError("SHEET_ROW_NOT_FOUND", "The Sheet row number is invalid.")
+
+    settings = get_settings()
+    sid = _resolve_sheet_id(sheet_id)
+    service = _service(token)
+    tab = _resolve_tab(service, sid, settings.sheet_tab)
+    headers = _header_map(service, tab, sid)
+    status_column = _column_letter(headers["Status"])
+    _execute(
+        lambda: service.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=sid,
+            range=_tab_range(tab, f"{status_column}{row_number}"),
+            valueInputOption="RAW",
+            body={"values": [[status]]},
         )
     )
 
@@ -408,16 +465,17 @@ def set_post_link(token: str, row_number: int, canva_link: str, drive_url: str, 
     settings = get_settings()
     sid = _resolve_sheet_id(sheet_id)
     service = _service(token)
-    headers = _header_map(service, settings.sheet_tab, sid)
+    tab = _resolve_tab(service, sid, settings.sheet_tab)
+    headers = _header_map(service, tab, sid)
     post_column = _column_letter(headers["Post Link"])
-    expected_range = _tab_range(settings.sheet_tab, f"{post_column}{row_number}")
+    expected_range = _tab_range(tab, f"{post_column}{row_number}")
     expected = _get_values(service, sid, expected_range)
     target_row = row_number
     if _cell_value(expected) != canva_link:
         column_values = _get_values(
             service,
             sid,
-            _tab_range(settings.sheet_tab, f"{post_column}:{post_column}"),
+            _tab_range(tab, f"{post_column}:{post_column}"),
         )
         matches = [
             index + 1
@@ -431,14 +489,70 @@ def set_post_link(token: str, row_number: int, canva_link: str, drive_url: str, 
             )
         target_row = matches[-1]
 
+    try:
+        _write_drive_chip(service, sid, tab, target_row, headers["Post Link"], drive_url)
+        return
+    except AutomationError as exc:
+        log.warning("Drive chip write failed (%s); falling back to a plain link", exc.code)
+
     _execute(
         lambda: service.spreadsheets()
         .values()
         .update(
             spreadsheetId=sid,
-            range=_tab_range(settings.sheet_tab, f"{post_column}{target_row}"),
+            range=_tab_range(tab, f"{post_column}{target_row}"),
             valueInputOption="RAW",
             body={"values": [[drive_url]]},
+        )
+    )
+
+
+def _write_drive_chip(
+    service,
+    spreadsheet_id: str,
+    tab: str,
+    row_number: int,
+    column_index: int,
+    url: str,
+) -> None:
+    """Write a Drive file smart chip into a single cell (Sheets native chip)."""
+    sheet_id_num = _numeric_sheet_id(service, spreadsheet_id, tab)
+    _execute(
+        lambda: service.spreadsheets()
+        .batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [
+                    {
+                        "updateCells": {
+                            "range": {
+                                "sheetId": sheet_id_num,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
+                                "startColumnIndex": column_index,
+                                "endColumnIndex": column_index + 1,
+                            },
+                            "rows": [
+                                {
+                                    "values": [
+                                        {
+                                            "userEnteredValue": {"stringValue": "@"},
+                                            "chipRuns": [
+                                                {
+                                                    "chip": {
+                                                        "richLinkProperties": {"uri": url}
+                                                    }
+                                                }
+                                            ],
+                                        }
+                                    ]
+                                }
+                            ],
+                            "fields": "userEnteredValue,chipRuns",
+                        }
+                    }
+                ]
+            },
         )
     )
 
@@ -446,6 +560,41 @@ def set_post_link(token: str, row_number: int, canva_link: str, drive_url: str, 
 def _service(token: str):
     credentials = Credentials(token=token)
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+
+
+def _resolve_tab(service, spreadsheet_id: str, tab: str) -> str:
+    """Return the tab to operate on.
+
+    Uses the configured tab when it exists. Otherwise falls back to the first
+    tab whose header row contains every required header, and raises a clear
+    error listing the available tabs when none matches.
+    """
+    info = _execute(
+        lambda: service.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title))")
+    )
+    titles = [
+        props["properties"]["title"]
+        for props in info.get("sheets", [])
+        if props.get("properties", {}).get("title")
+    ]
+    if tab in titles:
+        return tab
+    for title in titles:
+        try:
+            values = _get_values(service, spreadsheet_id, _tab_range(title, "1:1"))
+        except AutomationError:
+            continue
+        row1 = {str(value).strip().casefold() for value in (values[0] if values else [])}
+        if all(header.casefold() in row1 for header in _REQUIRED_HEADERS):
+            log.warning("Sheet tab %r not found; using tab %r instead", tab, title)
+            return title
+    raise AutomationError(
+        "SHEET_TAB_NOT_FOUND",
+        f"Tab '{tab}' does not exist in this spreadsheet, and no tab has the required "
+        f"header row ({', '.join(_REQUIRED_HEADERS)}). "
+        f"Tabs found: {', '.join(titles) or 'none'}.",
+    )
 
 
 def _header_map(service, tab: str, spreadsheet_id: str) -> dict[str, int]:

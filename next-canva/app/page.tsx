@@ -17,7 +17,7 @@ const TASK_TYPES = [
   "Branding/Other",
 ] as const;
 
-const STATUSES = ["Not Started", "In Progress", "Completed", "Blocked"] as const;
+const STATUSES = ["Not Started", "In Progress", "Done", "Blocked"] as const;
 
 type SheetRow = {
   row_number: number;
@@ -442,13 +442,14 @@ function HomeContent() {
           const dlResponse = await fetch("/api/download", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              google_access_token: activeToken.trim(),
-              date,
-              sheet_id: sheetId.trim(),
-              drive_folder_id: driveFolderId.trim(),
-              rows: downloadRows,
-            }),
+        body: JSON.stringify({
+          google_access_token: activeToken.trim(),
+          date,
+          sheet_id: sheetId.trim(),
+          drive_folder_id: driveFolderId.trim(),
+          notify_email: activeEmail.trim(),
+          rows: downloadRows,
+        }),
           });
           const dlBody = await readJson(dlResponse);
           if (!dlResponse.ok) {
@@ -504,6 +505,7 @@ function HomeContent() {
     setMessage("");
     setDownloadingRow(rowNumber);
     try {
+      const priorUrl = row.post_link?.startsWith("http") ? row.post_link : "";
       const response = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -512,12 +514,15 @@ function HomeContent() {
           date,
           sheet_id: sheetId.trim(),
           drive_folder_id: driveFolderId.trim(),
+          notify_email: activeEmail.trim(),
           rows: [
             {
               row_number: rowNumber,
               account: row.account,
               task_type: row.task_type,
               canva_link: canvaLink,
+              replace: !!row.post_link,
+              existing_drive_url: priorUrl,
             },
           ],
         }),
@@ -525,7 +530,11 @@ function HomeContent() {
       const body = await readJson(response);
       if (!response.ok) throw new Error(body.message || body.error || "Could not queue download.");
       setJob({ job_id: body.job_id ?? "", state: body.state ?? "queued", rows: [] });
-      setMessage(`Download queued for row ${rowNumber}. Watch the VNC screen.`);
+      setMessage(
+        row.post_link
+          ? `Queued re-download for row ${rowNumber} — the delivered Drive file will be replaced.`
+          : `Download queued for row ${rowNumber}. Watch the VNC screen.`,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not queue download.");
     } finally {
@@ -572,6 +581,7 @@ function HomeContent() {
           date,
           sheet_id: sheetId.trim(),
           drive_folder_id: driveFolderId.trim(),
+          notify_email: activeEmail.trim(),
           rows: items,
         }),
       });
@@ -898,10 +908,37 @@ function HomeContent() {
                         aria-label={`Task description for row ${row.row_number}`}
                       />
                       {hasLink ? (
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.5rem 0" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.5rem 0", flexWrap: "wrap" }}>
                           <span className="mini-dot done" />
-                          <span style={{ fontSize: "0.85rem", color: "var(--ok, #22c55e)" }}>Delivered</span>
-                          <a href={row.post_link} target="_blank" rel="noreferrer" style={{ fontSize: "0.8rem", opacity: 0.8 }}>View on Drive ↗</a>
+                          <span style={{ fontSize: "0.85rem", color: "var(--ok, #22c55e)", whiteSpace: "nowrap" }}>Delivered</span>
+                          {row.post_link.startsWith("http") && (
+                            <a href={row.post_link} target="_blank" rel="noreferrer" style={{ fontSize: "0.8rem", opacity: 0.8, whiteSpace: "nowrap" }}>View on Drive ↗</a>
+                          )}
+                          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flex: 1, minWidth: "260px" }}>
+                            <input
+                              value={canvaLink}
+                              onChange={(e) => updateCanvaLink(row.row_number, e.target.value)}
+                              onBlur={() => {
+                                const cleaned = sanitizeCanvaLink(canvaLink);
+                                if (cleaned && cleaned !== canvaLink) {
+                                  updateCanvaLink(row.row_number, cleaned);
+                                }
+                              }}
+                              placeholder="Paste Canva link to re-download…"
+                              type="url"
+                              style={{ flex: 1 }}
+                              aria-label={`Canva link to re-download row ${row.row_number}`}
+                            />
+                            <button
+                              type="button"
+                              className="primary-button"
+                              disabled={!canvaLink.trim() || isDownloading || jobRunning}
+                              onClick={() => handleDownload(row.row_number)}
+                              style={{ padding: "0.5rem 1rem", fontSize: "0.85rem", whiteSpace: "nowrap" }}
+                            >
+                              {isDownloading ? "Queuing…" : "↻ Re-download"}
+                            </button>
+                          </div>
                         </div>
                       ) : (
                         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>

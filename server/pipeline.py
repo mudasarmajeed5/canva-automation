@@ -15,6 +15,7 @@ from typing import Callable
 import canva_bot
 import cleanup
 import drive
+import emailer
 import sheets
 from config import Settings
 from jobs import JobStore
@@ -54,7 +55,17 @@ async def run_job(
                 continue
 
             try:
-                await _process_row(job_id, row, token, job_dir, store, uploaded_files, sheet_id, drive_folder_id)
+                await _process_row(
+                    job_id,
+                    row,
+                    token,
+                    job_dir,
+                    store,
+                    uploaded_files,
+                    sheet_id,
+                    drive_folder_id,
+                    job.get("date") or "",
+                )
             except AutomationError as exc:
                 _mark_failed(store, job_id, row["row_id"], exc.code, exc.message)
                 if exc.code == "TOKEN_EXPIRED":
@@ -83,7 +94,50 @@ async def run_job(
     final_state = "done_with_errors" if has_failed else "done"
     store.set_job_state(job_id, final_state)
     log.info("job %s finished: %s", job_id, final_state)
+
+    try:
+        await asyncio.to_thread(_send_job_email, final_job, settings, final_state)
+    except Exception:
+        log.exception("job %s: upload report email failed", job_id)
+
     return final_state
+
+
+def _send_job_email(final_job: dict, settings: Settings, final_state: str) -> None:
+    """Email a per-file upload report after the job finishes. Never raises."""
+    rows = final_job.get("rows") or []
+    if not rows:
+        return
+    lines: list[str] = []
+    for row in rows:
+        state = row.get("state") or ""
+        file_name = row.get("file") or row.get("canva_link") or "file"
+        folder = (row.get("folder_path") or "").strip()
+        url = (row.get("drive_url") or "").strip()
+        replaced = bool(row.get("replace"))
+        if state == "done":
+            if replaced:
+                where = folder or "same Drive link"
+                lines.append(
+                    f"REPLACED: {file_name} → {where} — previous version replaced ({url})"
+                )
+            else:
+                target = f" → {folder}" if folder else ""
+                lines.append(f"UPLOADED: {file_name}{target} ({url})")
+        elif state == "failed":
+            lines.append(
+                f"FAILED: {row.get('account', '')}/{row.get('task_type', '')} — "
+                f"{row.get('error') or 'unknown error'}"
+            )
+        else:
+            lines.append(f"{state.upper()}: {file_name}")
+
+    date = final_job.get("date") or ""
+    uploaded = sum(1 for r in rows if r.get("state") == "done")
+    suffix = " with errors" if final_state == "done_with_errors" else ""
+    subject = f"Canva upload report — {date} ({uploaded} file(s)){suffix}"
+    to = (final_job.get("notify_email") or "").strip() or settings.email_fallback_to
+    emailer.send_upload_report(to, subject, lines)
 
 
 async def _process_row(
@@ -95,13 +149,16 @@ async def _process_row(
     uploaded_files: list[Path],
     sheet_id: str = "",
     drive_folder_id: str = "",
+    job_date: str = "",
 ) -> None:
     row_id = row["row_id"]
+    replace = bool(row.get("replace"))
 
-    # Skip rows that already have a Drive link in Post Link.
-    existing_link = row.get("post_link") or row.get("drive_url") or ""
-    if existing_link.strip():
-        store.set_row_state(job_id, row_id, "done", drive_url=existing_link.strip())
+    # Skip rows that already have a Drive link in Post Link — unless the
+    # caller explicitly asked to re-download and replace the delivered file.
+    existing_link = (row.get("post_link") or row.get("drive_url") or "").strip()
+    if existing_link and not replace:
+        store.set_row_state(job_id, row_id, "done", drive_url=existing_link)
         log.info("row %s already has a Post Link; skipping download", row_id)
         return
 
@@ -117,14 +174,28 @@ async def _process_row(
         file_name=downloaded.name,
         file_path=str(downloaded.path),
     )
-    upload = await asyncio.to_thread(
-        drive.upload_and_share,
-        token,
-        row["account"],
-        row["task_type"],
-        downloaded,
-        drive_folder_id,
-    )
+
+    prior_url = _replace_target_url(store, job_id, row, sheet_id, job_date)
+    if replace and prior_url:
+        log.info("row %s: replacing Drive file in place", row_id)
+        upload = await asyncio.to_thread(
+            drive.replace_file,
+            token,
+            row["account"],
+            row["task_type"],
+            downloaded,
+            prior_url,
+            drive_folder_id,
+        )
+    else:
+        upload = await asyncio.to_thread(
+            drive.upload_and_share,
+            token,
+            row["account"],
+            row["task_type"],
+            downloaded,
+            drive_folder_id,
+        )
 
     # Uploaded + verified on Drive: this file may be deleted at the end of the job.
     uploaded_files.append(downloaded.path)
@@ -142,13 +213,29 @@ async def _process_row(
             "SHEET_ROW_NOT_FOUND", "The Sheet row number for this item is unknown."
         )
 
-    await asyncio.to_thread(
-        sheets.set_drive_link,
-        token,
-        int(row["sheet_row"]),
-        upload.web_view_link,
-        sheet_id,
-    )
+    # An in-place replace keeps the same URL: leave the Sheet cell (and its
+    # smart chip) untouched. Only write when the link is new or changed.
+    if not prior_url or upload.web_view_link != prior_url:
+        await asyncio.to_thread(
+            sheets.set_drive_link,
+            token,
+            int(row["sheet_row"]),
+            upload.web_view_link,
+            sheet_id,
+        )
+
+    # File is on Drive: mark the Sheet row Done. Failure here must not fail
+    # the row — the upload already succeeded.
+    try:
+        await asyncio.to_thread(
+            sheets.set_status,
+            token,
+            int(row["sheet_row"]),
+            "Done",
+            sheet_id,
+        )
+    except Exception:
+        log.exception("could not set Status=Done for row %s", row.get("sheet_row"))
 
     store.set_row_state(
         job_id,
@@ -156,7 +243,31 @@ async def _process_row(
         "done",
         drive_url=upload.web_view_link,
         warnings=upload.warnings,
+        folder_path=upload.folder_path,
     )
+
+
+def _replace_target_url(
+    store: JobStore, job_id: str, row: dict, sheet_id: str, job_date: str
+) -> str:
+    """Resolve the existing Drive URL to replace, if one can be found.
+
+    Order: URL sent by the app, this job's stored URL, then delivery history
+    for the same Sheet row (covers Sheet cells that hold a smart chip, which
+    the API reads back only as "@").
+    """
+    if not row.get("replace"):
+        return ""
+    for candidate in (row.get("existing_drive_url") or "", row.get("drive_url") or ""):
+        if drive.extract_drive_file_id(candidate):
+            return candidate.strip()
+    sheet_row = row.get("sheet_row")
+    if sheet_row is not None and sheet_id:
+        try:
+            return store.find_prior_drive_url(sheet_id, job_date, int(sheet_row), job_id)
+        except Exception:
+            log.exception("could not look up a prior Drive URL for row %s", row.get("row_id"))
+    return ""
 
 
 def _mark_failed(store: JobStore, job_id: str, row_id: str, code: str, message: str) -> None:

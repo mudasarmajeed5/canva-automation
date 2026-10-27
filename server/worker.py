@@ -128,7 +128,7 @@ class Worker:
             except Exception:
                 log.exception("leftover sweep failed")
             try:
-                deleted = self.store.delete_jobs_older_than(24)
+                deleted = self.store.delete_jobs_older_than(720)
                 if deleted:
                     log.info("deleted %s job(s) older than 24h", deleted)
             except Exception:

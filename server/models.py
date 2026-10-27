@@ -30,7 +30,7 @@ TASK_TYPES: tuple[str, ...] = (
     "Branding/Other",
 )
 
-STATUSES: tuple[str, ...] = ("Not Started", "In Progress", "Completed", "Blocked")
+STATUSES: tuple[str, ...] = ("Not Started", "In Progress", "Done", "Blocked")
 
 DEFAULT_STATUS = "Not Started"
 
@@ -123,6 +123,8 @@ class RowInput:
     task_description: str
     status: str
     canva_link: str
+    replace: bool = False
+    existing_drive_url: str = ""
 
 
 @dataclass
@@ -335,6 +337,8 @@ class DownloadItem(BaseModel):
     account: str
     task_type: str
     canva_link: str
+    replace: bool = False
+    existing_drive_url: str = ""
 
     @field_validator("account")
     @classmethod
@@ -369,6 +373,7 @@ class DownloadRequest(BaseModel):
     rows: list[DownloadItem] = Field(min_length=1)
     sheet_id: str = ""
     drive_folder_id: str = ""
+    notify_email: str = ""
 
     _check_sheet_id = field_validator("sheet_id")(normalize_sheet_id)
     _check_drive_folder_id = field_validator("drive_folder_id")(normalize_sheet_id)
@@ -379,6 +384,16 @@ class DownloadRequest(BaseModel):
         if not is_valid_sheet_date(value):
             raise ValueError("date must use the D-MMM-YYYY format, e.g. 21-Oct-2026")
         return value.strip()
+
+    @field_validator("notify_email")
+    @classmethod
+    def _check_notify_email(cls, value: str) -> str:
+        value = (value or "").strip().lower()
+        if not value:
+            return ""
+        if "@" not in value or "." not in value.split("@")[-1] or len(value) > 320:
+            raise ValueError("notify_email must be a valid email address")
+        return value
 
 
 class UserSettingsRequest(BaseModel):

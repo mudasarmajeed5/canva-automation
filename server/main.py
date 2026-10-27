@@ -198,6 +198,26 @@ async def validation_exception_handler(
     return JSONResponse(status_code=400, content={"error": "validation_error", "details": details})
 
 
+_ERROR_STATUS = {
+    "TOKEN_EXPIRED": 401,
+    "SHEET_PERMISSION_DENIED": 403,
+    "SHEET_NOT_FOUND": 404,
+    "SHEET_ROW_NOT_FOUND": 404,
+    "SHEET_HEADERS_MISSING": 404,
+    "SHEET_TAB_NOT_FOUND": 404,
+    "SHEET_ID_MISSING": 400,
+}
+
+
+def _error_status(exc: AutomationError) -> int:
+    """Client-facing HTTP status for an automation error.
+
+    Never 502: Cloudflare replaces origin 502 bodies with its own plain-text
+    ``error code: 502`` page, which hides the real message from the app.
+    """
+    return _ERROR_STATUS.get(exc.code, 400)
+
+
 @app.get("/health")
 async def health() -> dict[str, bool]:
     return {"ok": True}
@@ -288,13 +308,13 @@ async def create_job(
     except AutomationError as exc:
         log.error("sheet append failed (%s)", exc.code)
         return JSONResponse(
-            status_code=502,
+            status_code=_error_status(exc),
             content={"error": "sheet_write_failed", "message": exc.message},
         )
     except Exception:
         log.exception("sheet append failed unexpectedly")
         return JSONResponse(
-            status_code=502,
+            status_code=500,
             content={
                 "error": "sheet_write_failed",
                 "message": "Could not write the rows to Google Sheets.",
@@ -382,11 +402,11 @@ async def get_sheet_rows(
     try:
         rows = await asyncio.to_thread(sheets.read_rows, token, date, sheet_id)
     except AutomationError as exc:
-        return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
+        return JSONResponse(status_code=_error_status(exc), content={"error": exc.code, "message": exc.message})
     except Exception:
         log.exception("sheet read failed")
         return JSONResponse(
-            status_code=502,
+            status_code=500,
             content={"error": "SHEET_API_FAILED", "message": "Could not read the Sheet."},
         )
     return JSONResponse(status_code=200, content={"rows": rows})
@@ -403,11 +423,11 @@ async def create_sheet_rows(
             sheets.create_rows, payload.google_access_token, payload.date, rows, payload.sheet_id
         )
     except AutomationError as exc:
-        return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
+        return JSONResponse(status_code=_error_status(exc), content={"error": exc.code, "message": exc.message})
     except Exception:
         log.exception("sheet create rows failed")
         return JSONResponse(
-            status_code=502,
+            status_code=500,
             content={"error": "SHEET_APPEND_FAILED", "message": "Could not write the rows to Sheets."},
         )
     return JSONResponse(
@@ -427,11 +447,11 @@ async def patch_sheet_rows(
             sheets.update_rows, payload.google_access_token, updates, payload.sheet_id
         )
     except AutomationError as exc:
-        return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.message})
+        return JSONResponse(status_code=_error_status(exc), content={"error": exc.code, "message": exc.message})
     except Exception:
         log.exception("sheet update rows failed")
         return JSONResponse(
-            status_code=502,
+            status_code=500,
             content={"error": "SHEET_API_FAILED", "message": "Could not update the Sheet."},
         )
     return JSONResponse(status_code=200, content={"updated": len(updates)})
@@ -465,6 +485,8 @@ async def queue_download(
                 task_description="",
                 status="Not Started",
                 canva_link=item.canva_link,
+                replace=item.replace,
+                existing_drive_url=item.existing_drive_url,
             )
         )
         sheet_rows[row_id] = item.row_number
@@ -478,6 +500,7 @@ async def queue_download(
         sheet_rows,
         payload.sheet_id,
         payload.drive_folder_id,
+        payload.notify_email,
     )
     remember_token(job_id, payload.google_access_token)
     worker.enqueue(job_id)

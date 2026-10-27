@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     requested_by     TEXT,
     sheet_id         TEXT NOT NULL DEFAULT '',
     drive_folder_id  TEXT NOT NULL DEFAULT '',
+    notify_email     TEXT NOT NULL DEFAULT '',
     state            TEXT NOT NULL,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
@@ -59,9 +60,12 @@ CREATE TABLE IF NOT EXISTS job_rows (
     file_name        TEXT,
     file_path        TEXT,
     drive_url        TEXT,
+    folder_path      TEXT,
     error            TEXT,
     error_code       TEXT,
     warnings         TEXT NOT NULL DEFAULT '[]',
+    replace          INTEGER NOT NULL DEFAULT 0,
+    existing_drive_url TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (job_id, row_id),
     FOREIGN KEY (job_id) REFERENCES jobs (job_id) ON DELETE CASCADE
 );
@@ -116,6 +120,23 @@ class JobStore:
                 self._conn.execute(
                     "ALTER TABLE jobs ADD COLUMN drive_folder_id TEXT NOT NULL DEFAULT ''"
                 )
+            if "notify_email" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN notify_email TEXT NOT NULL DEFAULT ''"
+                )
+            row_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(job_rows)")}
+            if "replace" not in row_columns:
+                self._conn.execute(
+                    "ALTER TABLE job_rows ADD COLUMN replace INTEGER NOT NULL DEFAULT 0"
+                )
+            if "existing_drive_url" not in row_columns:
+                self._conn.execute(
+                    "ALTER TABLE job_rows ADD COLUMN existing_drive_url TEXT NOT NULL DEFAULT ''"
+                )
+            if "folder_path" not in row_columns:
+                self._conn.execute(
+                    "ALTER TABLE job_rows ADD COLUMN folder_path TEXT"
+                )
             self._conn.commit()
 
     def close(self) -> None:
@@ -133,20 +154,22 @@ class JobStore:
         sheet_rows: dict[str, int],
         sheet_id: str = "",
         drive_folder_id: str = "",
+        notify_email: str = "",
     ) -> None:
         now = utcnow_iso()
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO jobs (job_id, date, requested_by, sheet_id, drive_folder_id, state,"
+                "INSERT INTO jobs (job_id, date, requested_by, sheet_id, drive_folder_id, notify_email, state,"
                 " created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
-                (job_id, sheet_date, requested_by, sheet_id, drive_folder_id, now, now),
+                " VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
+                (job_id, sheet_date, requested_by, sheet_id, drive_folder_id, notify_email, now, now),
             )
             for position, row in enumerate(rows):
                 self._conn.execute(
                     "INSERT INTO job_rows (job_id, row_id, position, account, task_type,"
-                    " task_description, sheet_status, canva_link, sheet_row, state)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                    " task_description, sheet_status, canva_link, sheet_row, state,"
+                    " replace, existing_drive_url)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
                     (
                         job_id,
                         row.row_id,
@@ -157,6 +180,8 @@ class JobStore:
                         row.status,
                         row.canva_link,
                         sheet_rows.get(row.row_id),
+                        1 if row.replace else 0,
+                        row.existing_drive_url,
                     ),
                 )
 
@@ -178,6 +203,7 @@ class JobStore:
         file_name: str | None = None,
         file_path: str | None = None,
         drive_url: str | None = None,
+        folder_path: str | None = None,
         error: str | None = None,
         error_code: str | None = None,
         warnings: list[str] | None = None,
@@ -191,6 +217,7 @@ class JobStore:
             ("file_name", file_name),
             ("file_path", file_path),
             ("drive_url", drive_url),
+            ("folder_path", folder_path),
             ("error", error),
             ("error_code", error_code),
         ):
@@ -230,7 +257,7 @@ class JobStore:
                 )
             return len(job_ids)
 
-    def delete_jobs_older_than(self, hours: int = 24) -> int:
+    def delete_jobs_older_than(self, hours: int = 720) -> int:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(
             timespec="seconds"
         ).replace("+00:00", "Z")
@@ -253,6 +280,24 @@ class JobStore:
             ).fetchall()
         return _job_to_dict(job, rows)
 
+    def find_prior_drive_url(
+        self, sheet_id: str, sheet_date: str, sheet_row: int, exclude_job_id: str
+    ) -> str:
+        """Most recent Drive URL this app delivered for a given Sheet row.
+
+        Used by replace mode when the Sheet cell holds a smart chip (the API
+        only reads "@" back) so the original file ID is still recoverable.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT r.drive_url FROM job_rows r JOIN jobs j ON j.job_id = r.job_id"
+                " WHERE r.sheet_row = ? AND r.drive_url LIKE 'http%'"
+                " AND j.sheet_id = ? AND j.date = ? AND r.job_id != ?"
+                " ORDER BY r.rowid DESC LIMIT 1",
+                (sheet_row, sheet_id, sheet_date, exclude_job_id),
+            ).fetchone()
+        return row["drive_url"] if row else ""
+
     def last_successful_job_at(self) -> str | None:
         with self._lock:
             row = self._conn.execute(
@@ -273,6 +318,7 @@ def _job_to_dict(job: sqlite3.Row, rows: Iterable[sqlite3.Row]) -> dict:
         "date": job["date"],
         "sheet_id": job["sheet_id"],
         "drive_folder_id": job["drive_folder_id"],
+        "notify_email": job["notify_email"] or "",
         "created_at": job["created_at"],
         "updated_at": job["updated_at"],
         "rows": [
@@ -292,6 +338,9 @@ def _job_to_dict(job: sqlite3.Row, rows: Iterable[sqlite3.Row]) -> dict:
                 "sheet_status": row["sheet_status"],
                 "canva_link": row["canva_link"],
                 "file_path": row["file_path"],
+                "folder_path": row["folder_path"] or "",
+                "replace": bool(row["replace"]),
+                "existing_drive_url": row["existing_drive_url"] or "",
             }
             for row in rows
         ],
