@@ -124,6 +124,7 @@ function HomeContent() {
   const { data: session, status } = useSession();
   const [date, setDate] = useState(today);
   const [rows, setRows] = useState<SheetRow[]>([]);
+  const [rowsLoaded, setRowsLoaded] = useState(false);
   const [newEntries, setNewEntries] = useState<NewEntry[]>([defaultNewEntry()]);
   const [canvaLinks, setCanvaLinks] = useState<Record<number, string>>({});
   const [dirtyRows, setDirtyRows] = useState<Set<number>>(new Set());
@@ -214,6 +215,7 @@ function HomeContent() {
       const nextRows = body.rows || [];
       rowsRef.current = nextRows;
       setRows(nextRows);
+      setRowsLoaded(true);
       cancelAutoSync();
       resetDirty();
       const links: Record<number, string> = {};
@@ -845,7 +847,7 @@ function HomeContent() {
         </aside>
       </div>
 
-      {rows.length > 0 && (
+      {(loadingRows || rowsLoaded || rows.length > 0) && (
         <>
           <div className="rule" />
           <section className="card" style={{ marginTop: "1rem" }}>
@@ -855,8 +857,13 @@ function HomeContent() {
                 <h2>Rows for {date}</h2>
               </div>
               <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
-                {loadingRows && <span className="step-mark">LOADING…</span>}
-                {uploadableRows.length > 0 && (
+                {loadingRows && (
+                  <span className="step-mark load-pill" role="status" aria-live="polite">
+                    <span className="load-spinner" aria-hidden="true" />
+                    Loading…
+                  </span>
+                )}
+                {!loadingRows && uploadableRows.length > 0 && (
                   <button
                     className="primary-button"
                     onClick={handleUploadAll}
@@ -866,8 +873,8 @@ function HomeContent() {
                     {uploadAll ? "Queuing…" : `Upload all (${uploadableRows.length})`}
                   </button>
                 )}
-                {dirtyCount > 0 && (
-                  <button className="primary-button" onClick={handleSync} disabled={syncing} style={{ padding: "0.5rem 1rem", fontSize: "0.85rem" }}>
+                {!loadingRows && dirtyCount > 0 && (
+                  <button className="primary-button" onClick={handleSync} disabled={syncing} style={{ padding: "0.5rem 1rem", fontSize: "0.85rem", whiteSpace: "nowrap" }}>
                     {syncing ? "Saving…" : `Sync ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`}
                   </button>
                 )}
@@ -875,8 +882,28 @@ function HomeContent() {
               </div>
             </div>
 
-            <div className="entry-list">
-              {rows.map((row) => {
+            {loadingRows && rows.length === 0 ? (
+              <div className="entry-list skeleton-list" aria-busy="true">
+                {[0, 1, 2].map((n) => (
+                  <div className="entry-row skeleton-row" key={`skeleton-${n}`} aria-hidden="true">
+                    <span className="row-number skeleton-block skeleton-num" />
+                    <div className="entry-fields">
+                      <div className="entry-selects">
+                        <span className="skeleton-block skeleton-field" />
+                        <span className="skeleton-block skeleton-field" />
+                        <span className="skeleton-block skeleton-field" />
+                      </div>
+                      <span className="skeleton-block skeleton-input" />
+                      <span className="skeleton-block skeleton-input short" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : rows.length === 0 ? (
+              <p className="empty-copy">No tasks on the sheet for {date} yet. Add them in the card above.</p>
+            ) : (
+              <div className={`entry-list${loadingRows ? " is-loading" : ""}`} aria-busy={loadingRows || undefined}>
+                {rows.map((row) => {
                 const hasLink = !!row.post_link;
                 const canvaLink = canvaLinks[row.row_number] ?? "";
                 const isDownloading = downloadingRow === row.row_number;
@@ -974,7 +1001,8 @@ function HomeContent() {
                   </div>
                 );
               })}
-            </div>
+              </div>
+            )}
           </section>
         </>
       )}
