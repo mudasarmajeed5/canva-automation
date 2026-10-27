@@ -1,4 +1,4 @@
-"""LLM folder routing: GROQ primary, Gemini fallback, None → keyword rules.
+"""LLM folder routing: GROQ → Gemini → OpenRouter, None → keyword rules.
 
 Returns a validated ``{"folder_id", "path", "confidence", "reason"}`` or None.
 The chosen folder_id must exist in the explored tree (anti-hallucination).
@@ -33,7 +33,7 @@ def route(
     task_type: str,
     settings: Settings,
 ) -> dict[str, Any] | None:
-    """Ask GROQ first, then Gemini. Returns a validated decision or None."""
+    """Ask GROQ, then Gemini, then OpenRouter. Returns a validated decision or None."""
     if not tree:
         return None
     user_prompt = _build_prompt(tree, file_name, account, task_type)
@@ -42,7 +42,9 @@ def route(
     if decision is None:
         decision = _call_gemini(settings, user_prompt)
     if decision is None:
-        log.info("AI routing unavailable (both providers failed); keyword fallback")
+        decision = _call_openrouter(settings, user_prompt)
+    if decision is None:
+        log.info("AI routing unavailable (all providers failed); keyword fallback")
         return None
 
     validated = _validate(decision, tree, settings)
@@ -148,6 +150,36 @@ def _call_gemini(settings: Settings, user_prompt: str) -> dict[str, Any] | None:
             if attempt >= 2:
                 return None
     return None
+
+
+def _call_openrouter(settings: Settings, user_prompt: str) -> dict[str, Any] | None:
+    if not settings.openrouter_api_key:
+        return None
+    try:
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.openrouter_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.routing_model_openrouter,
+                "messages": [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+                "max_tokens": 500,
+            },
+            timeout=settings.routing_timeout_seconds,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        return _parse_json(content)
+    except Exception as exc:
+        log.warning("OpenRouter routing failed: %s", exc)
+        return None
 
 
 def _parse_json(content: str) -> dict[str, Any] | None:

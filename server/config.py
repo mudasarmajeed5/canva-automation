@@ -78,12 +78,14 @@ class Settings:
     # AI folder routing
     groq_api_key: str = ""
     gemini_api_key: str = ""
+    openrouter_api_key: str = ""
     routing_min_confidence: float = 0.75
     routing_max_depth: int = 3
     routing_max_nodes: int = 300
     routing_timeout_seconds: int = 20
     routing_model_groq: str = "openai/gpt-oss-120b"
     routing_model_gemini: str = "gemini-3.8-flash"
+    routing_model_openrouter: str = "openai/gpt-4o-mini"
 
 
 @lru_cache(maxsize=1)
@@ -118,10 +120,12 @@ def get_settings() -> Settings:
         email_fallback_to=_env("EMAIL_FALLBACK_TO", "hsarosh569@gmail.com"),
         groq_api_key=_env("GROQ_API_KEY", ""),
         gemini_api_key=_env("GEMINI_API_KEY", ""),
+        openrouter_api_key=_env("OPENROUTER_API_KEY", ""),
         routing_min_confidence=_env_float("ROUTING_MIN_CONFIDENCE", 0.75),
         routing_max_depth=_env_int("ROUTING_MAX_DEPTH", 3),
         routing_max_nodes=_env_int("ROUTING_MAX_NODES", 300),
         routing_timeout_seconds=_env_int("ROUTING_TIMEOUT_SECONDS", 20),
         routing_model_groq=_env("ROUTING_MODEL_GROQ", "openai/gpt-oss-120b"),
         routing_model_gemini=_env("ROUTING_MODEL_GEMINI", "gemini-3.8-flash"),
+        routing_model_openrouter=_env("ROUTING_MODEL_OPENROUTER", "openai/gpt-4o-mini"),
     )
