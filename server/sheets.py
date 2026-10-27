@@ -213,6 +213,55 @@ def update_rows(token: str, updates: list[dict], sheet_id: str = "") -> None:
     )
 
 
+def _row_has_real_content(row: list[str], headers: dict[str, int]) -> bool:
+    """True when a row carries task data (Status alone does not count)."""
+    for header in ("Date", "Business/Account", "Task Type", "Task Description", "Post Link"):
+        column = headers.get(header)
+        if column is None or column >= len(row):
+            continue
+        if str(row[column]).strip():
+            return True
+    return False
+
+
+def _clear_hollow_rows(
+    service, sid: str, settings, tab: str, headers: dict[str, int], width: int
+) -> int:
+    """Blank out rows that have no task data (e.g. Status-only leftovers).
+
+    Returns the number of rows cleared. Keeps sheet_row numbers stable —
+    values are cleared, rows are not deleted.
+    """
+    cells = _data_cells(service, sid, tab, width)
+    last_col = _column_letter(width - 1)
+    cleared = 0
+    batch: list[dict] = []
+    for index, row in enumerate(cells):
+        if _row_has_real_content(row, headers):
+            continue
+        if not any(str(cell).strip() for cell in row):
+            continue  # already fully empty
+        sheet_row = index + 2
+        batch.append(
+            {
+                "range": _tab_range(tab, f"A{sheet_row}:{last_col}{sheet_row}"),
+                "values": [[""] * width],
+            }
+        )
+        cleared += 1
+    if batch:
+        _execute(
+            lambda: service.spreadsheets()
+            .values()
+            .batchUpdate(
+                spreadsheetId=sid,
+                body={"valueInputOption": "RAW", "data": batch},
+            )
+        )
+        log.info("cleared %d hollow row(s) on tab %r", cleared, tab)
+    return cleared
+
+
 def _append_block(
     service,
     sid: str,
@@ -232,6 +281,7 @@ def _append_block(
     the block is last, or inserted directly after it when a later date block
     follows.
     """
+    _clear_hollow_rows(service, sid, settings, tab, headers, width)
     dates = [
         row[headers["Date"]].strip()
         for row in _data_cells(service, sid, tab, width)
@@ -242,14 +292,19 @@ def _append_block(
         values[0][headers["Date"]] = date
         for value_row in values[1:]:
             value_row[headers["Date"]] = CONTINUATION
-        return _append_values(service, sid, settings, tab, rows, values)
+        return _append_values(service, sid, settings, tab, rows, values, headers)
 
     _start, end = bounds
     for value_row in values:
         value_row[headers["Date"]] = CONTINUATION
 
-    if end >= len(dates) - 1:
-        return _append_values(service, sid, settings, tab, rows, values)
+    # "Last block" means no further real content after it (ignore trailing blanks).
+    last_real = max(
+        (i for i, d in enumerate(dates) if d),
+        default=len(dates) - 1,
+    )
+    if end >= last_real:
+        return _append_values(service, sid, settings, tab, rows, values, headers)
 
     first_row = end + 3
     count = len(values)
@@ -291,28 +346,38 @@ def _append_block(
     return {row.row_id: first_row + index for index, row in enumerate(rows)}
 
 
-def _last_used_row(service, spreadsheet_id: str, tab: str) -> int:
-    """1-based sheet row of the last cell with any content (header counts).
+def _last_used_row(
+    service, spreadsheet_id: str, tab: str, headers: dict[str, int] | None = None
+) -> int:
+    """1-based sheet row of the last row with real task content.
 
-    Google's values.append(range=A1) stops at the first empty row inside the
-    "table" starting at A1, which can insert mid-sheet. Scanning the whole
-    grid gives the true end so new rows always land after it.
+    Status-only hollow rows are ignored so append never lands after junk.
     """
     values = _get_values(service, spreadsheet_id, _tab_range(tab, "A:Z"))
     last = 1
     for index, row_values in enumerate(values, start=1):
-        if any(str(cell).strip() for cell in row_values):
+        row = list(row_values)
+        if headers is not None:
+            if _row_has_real_content(row, headers):
+                last = index
+        elif any(str(cell).strip() for cell in row):
             last = index
     return last
 
 
 def _append_values(
-    service, sid: str, settings, tab: str, rows: list[RowInput], values: list[list[str]]
+    service,
+    sid: str,
+    settings,
+    tab: str,
+    rows: list[RowInput],
+    values: list[list[str]],
+    headers: dict[str, int] | None = None,
 ) -> dict[str, int]:
-    """Write rows at the first empty row after the sheet's true last content row."""
+    """Write rows at the first empty row after the last real content row."""
     if not rows:
         return {}
-    first_row = _last_used_row(service, sid, tab) + 1
+    first_row = _last_used_row(service, sid, tab, headers) + 1
     width = max(len(value_row) for value_row in values)
     last_col = _column_letter(width - 1)
     _execute(
@@ -332,18 +397,26 @@ def _date_block_bounds(dates: list[str], target: str) -> tuple[int, int] | None:
     """0-based ``[start, end]`` of ``target``'s block, or None when absent.
 
     The block starts at the first row whose Date equals ``target`` and ends
-    just before the next row carrying any other non-empty date value; '||'
-    continuation markers and empty cells stay inside the block.
+    at the last '||' continuation (or repeat of ``target``). An empty Date
+    cell ends the block so hollow rows between dates never join the block.
     """
     start: int | None = None
-    for index, cell in enumerate(dates):
+    end: int | None = None
+    for index, raw in enumerate(dates):
+        cell = (raw or "").strip()
         if start is None:
             if cell == target:
                 start = index
+                end = index
             continue
-        if cell and cell != target and cell != CONTINUATION:
-            return start, index - 1
-    return (start, len(dates) - 1) if start is not None else None
+        if cell == CONTINUATION or cell == target:
+            end = index
+        else:
+            # Different date or empty Date → block is over.
+            break
+    if start is None or end is None:
+        return None
+    return start, end
 
 
 def _block_rows(
@@ -355,17 +428,11 @@ def _block_rows(
     if bounds is None:
         return []
     start, end = bounds
-    content_columns = [
-        headers["Business/Account"],
-        headers["Task Type"],
-        headers["Task Description"],
-        headers["Status"],
-        headers["Post Link"],
-    ]
     rows: list[tuple[int, list[str]]] = []
     for index in range(start, end + 1):
         row = cells[index]
-        if not any(row[column].strip() for column in content_columns):
+        # Status alone is not a task — skip hollow leftovers inside a block.
+        if not _row_has_real_content(row, headers):
             continue
         rows.append((index + 2, row))
     return rows
