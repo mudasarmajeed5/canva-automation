@@ -108,36 +108,39 @@ def _send_job_email(final_job: dict, settings: Settings, final_state: str) -> No
     rows = final_job.get("rows") or []
     if not rows:
         return
-    lines: list[str] = []
+    entries: list[dict] = []
     for row in rows:
         state = row.get("state") or ""
         file_name = row.get("file") or row.get("canva_link") or "file"
         folder = (row.get("folder_path") or "").strip()
         url = (row.get("drive_url") or "").strip()
         replaced = bool(row.get("replace"))
+        entry = {
+            "file": file_name,
+            "path": folder,
+            "url": url,
+            "account": row.get("account") or "",
+            "task_type": row.get("task_type") or "",
+        }
         if state == "done":
+            entry["kind"] = "replaced" if replaced else "uploaded"
             if replaced:
-                where = folder or "same Drive link"
-                lines.append(
-                    f"REPLACED: {file_name} → {where} — previous version replaced ({url})"
-                )
-            else:
-                target = f" → {folder}" if folder else ""
-                lines.append(f"UPLOADED: {file_name}{target} ({url})")
+                entry["detail"] = "Previous version replaced in place — same Drive link."
         elif state == "failed":
-            lines.append(
-                f"FAILED: {row.get('account', '')}/{row.get('task_type', '')} — "
-                f"{row.get('error') or 'unknown error'}"
-            )
+            entry["kind"] = "failed"
+            entry["detail"] = row.get("error") or "unknown error"
         else:
-            lines.append(f"{state.upper()}: {file_name}")
+            entry["kind"] = state or "info"
+        entries.append(entry)
 
     date = final_job.get("date") or ""
     uploaded = sum(1 for r in rows if r.get("state") == "done")
     suffix = " with errors" if final_state == "done_with_errors" else ""
     subject = f"Canva upload report — {date} ({uploaded} file(s)){suffix}"
     to = (final_job.get("notify_email") or "").strip() or settings.email_fallback_to
-    emailer.send_upload_report(to, subject, lines)
+    emailer.send_upload_report(
+        to, subject, entries, date=date, final_state=final_state
+    )
 
 
 async def _process_row(

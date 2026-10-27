@@ -92,13 +92,13 @@ Update `.env.example` with these keys (no real password in the example).
 ### 4b. New `server/emailer.py`
 
 ```text
-send_upload_report(to: str, subject: str, lines: list[str]) -> bool
+send_upload_report(to, subject, entries: list[dict], *, date="", final_state="") -> bool
 ```
 
 - stdlib `smtplib` + `email.message.EmailMessage`.
 - STARTTLS to `smtp_host:smtp_port`, auth `smtp_user` / `smtp_app_password`, from `smtp_from`.
 - Timeout 10s. Return `False` and `log.exception` on any failure — **never raise into the pipeline**.
-- Build a plain-text body from `lines` (one bullet per file).
+- Sends a styled **HTML** report (inline styles, table layout, app palette) with a plain-text alternative. Nested `folder_path` is rendered as breadcrumbs (`root / business / month / type`). Each entry: `kind` (`uploaded`/`replaced`/`failed`), `file`, `path`, `url`, optional `detail`, `account`, `task_type`.
 
 ### 4c. Persist recipient on the job
 
@@ -123,12 +123,12 @@ After `store.set_job_state(job_id, final_state)`:
 
 1. `final_job = store.get_job(job_id)` (already loaded).
 2. `to = (job.get("notify_email") or "").strip() or settings.email_fallback_to`.
-3. Build `lines` from `final_job["rows"]`:
-   - done + replace: `REPLACED: {file_name} → {folder_path or "same Drive link"} — previous version replaced ({drive_url})`
-   - done + fresh: `UPLOADED: {file_name} → {folder_path} ({drive_url})`
-   - failed: `FAILED: {account}/{task_type} — {error}`
+3. Build `entries` (list of dicts) from `final_job["rows"]`:
+   - done + replace: `{kind: "replaced", file, path: folder_path, url: drive_url, detail: "Previous version replaced in place…"}`
+   - done + fresh: `{kind: "uploaded", file, path: folder_path, url: drive_url}`
+   - failed: `{kind: "failed", file, account, task_type, detail: error}`
 4. Subject: `Canva upload report — {date} ({n} file(s))` or `… with errors`.
-5. `await asyncio.to_thread(send_upload_report, to, subject, lines)` inside try/except.
+5. `await asyncio.to_thread(send_upload_report, to, subject, entries, date=date, final_state=final_state)` inside try/except.
 
 Use row fields already stored: `file_name`, `drive_url`, `warnings`, `state`, `error`. `folder_path` may be on the upload result — if not persisted, derive from warnings/`drive_url` or add `folder_path` to `set_row_state` (prefer: extend `set_row_state` / `job_rows` with `folder_path TEXT` if missing; otherwise parse from upload warnings — simplest is to pass `folder_path` through `set_row_state` like `drive_url`).
 
@@ -239,7 +239,7 @@ Run with `server/.venv/bin/python` from `server/`:
 
 1. `systemctl restart canva-automation` (no sudo); `curl -s http://127.0.0.1:8473/health` → `{"ok":true}`.
 2. Live: `GET /api/sheet-rows` on a sheet with a mid-sheet blank + new POST append → row numbers after true end; Status column becomes `Done` after a real or mocked upload path if safe to test.
-3. Email: run a one-off `emailer.send_upload_report` to `hsarosh569@gmail.com` with a test line — confirm delivery (check phone).
+3. Email: run a one-off `emailer.send_upload_report` to `hsarosh569@gmail.com` with a sample HTML entry list — confirm delivery (check phone).
 4. Tunnel health: `https://events.mudasarmajeed5.tech/health`.
 5. Frontend: after Vercel deploy (only if user says push), confirm CSS/content change.
 6. **Never push without explicit user "push".**
