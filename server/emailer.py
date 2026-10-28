@@ -1,4 +1,4 @@
-"""Job completion email reports via Google SMTP (app password).
+"""Job completion email reports (Resend primary; SMTP fallback).
 
 Sends a styled HTML report (with a plain-text alternative) so nested Drive
 paths read as breadcrumbs instead of one long line. Never raises.
@@ -34,6 +34,26 @@ _KIND_STYLE = {
 }
 
 
+def report_subject(
+    date: str, entries: list[dict], final_state: str = ""
+) -> str:
+    """Short, human subject line for the job report."""
+    items = [e for e in entries if isinstance(e, dict)]
+    counts = _stats(items)
+    total = counts["uploaded"] + counts["replaced"]
+    failed = counts["failed"]
+    when = (date or "").strip() or "today"
+    if not items:
+        return f"Nothing to deliver · {when}"
+    if failed and total:
+        return f"{total} delivered, {failed} need{'s' if failed == 1 else ''} attention · {when}"
+    if failed and not total:
+        return f"{failed} file{'s' if failed != 1 else ''} failed · {when}"
+    if total == 1:
+        return f"1 file delivered to Drive · {when}"
+    return f"{total} files delivered to Drive · {when}"
+
+
 def send_upload_report(
     to: str,
     subject: str,
@@ -53,16 +73,29 @@ def send_upload_report(
     if not recipient:
         log.warning("no email recipient configured; skipping upload report")
         return False
-    if not settings.smtp_app_password:
-        log.warning("SMTP_APP_PASSWORD not set; skipping upload report")
-        return False
 
     items = [e for e in entries if isinstance(e, dict)]
     plain = _render_plain(items)
     body_html = _render_html(items, date=date, final_state=final_state)
+    sender = settings.email_from or settings.smtp_from or settings.smtp_user
+
+    if settings.resend_api_key:
+        if _send_resend(settings, recipient, subject, plain, body_html, sender):
+            log.info(
+                "upload report emailed via Resend to %s (%d entr%s)",
+                recipient,
+                len(items),
+                "y" if len(items) == 1 else "ies",
+            )
+            return True
+        log.warning("Resend send failed; trying SMTP fallback")
+
+    if not settings.smtp_app_password:
+        log.warning("no Resend key and SMTP_APP_PASSWORD not set; skipping upload report")
+        return False
 
     message = EmailMessage()
-    message["From"] = settings.smtp_from or settings.smtp_user
+    message["From"] = sender
     message["To"] = recipient
     message["Subject"] = subject
     message.set_content(plain)
@@ -76,7 +109,7 @@ def send_upload_report(
             server.login(settings.smtp_user, settings.smtp_app_password)
             server.send_message(message)
         log.info(
-            "upload report emailed to %s (%d entr%s)",
+            "upload report emailed via SMTP to %s (%d entr%s)",
             recipient,
             len(items),
             "y" if len(items) == 1 else "ies",
@@ -84,6 +117,37 @@ def send_upload_report(
         return True
     except Exception:
         log.exception("failed to send upload report to %s", recipient)
+        return False
+
+
+def _send_resend(
+    settings,
+    recipient: str,
+    subject: str,
+    plain: str,
+    body_html: str,
+    sender: str,
+) -> bool:
+    try:
+        import resend
+
+        resend.api_key = settings.resend_api_key
+        response = resend.Emails.send(
+            {
+                "from": sender,
+                "to": [recipient],
+                "subject": subject,
+                "html": body_html,
+                "text": plain,
+            }
+        )
+        message_id = getattr(response, "id", None) or (
+            response.get("id") if isinstance(response, dict) else ""
+        )
+        log.info("Resend accepted message id=%s to=%s", message_id, recipient)
+        return True
+    except Exception:
+        log.exception("Resend send failed for %s", recipient)
         return False
 
 
@@ -146,12 +210,24 @@ def _render_plain(items: list[dict]) -> str:
 def _render_html(items: list[dict], *, date: str, final_state: str) -> str:
     counts = _stats(items)
     total = len(items)
-    state_label = {
-        "done": "All done",
-        "done_with_errors": "Finished with errors",
-        "failed": "Failed",
-    }.get(final_state, "Finished")
-    accent = _CORAL if final_state in ("done_with_errors", "failed") else _MINT
+    delivered = counts["uploaded"] + counts["replaced"]
+    failed = counts["failed"]
+    if delivered and not failed:
+        headline = f"{delivered} file{'s' if delivered != 1 else ''}, delivered."
+        state_label = "All done"
+        accent = _MINT
+    elif delivered and failed:
+        headline = f"{delivered} delivered. {failed} need{'s' if failed == 1 else ''} a look."
+        state_label = "Finished with errors"
+        accent = _CORAL
+    elif failed:
+        headline = "Something went wrong."
+        state_label = "Failed"
+        accent = _CORAL
+    else:
+        headline = "Nothing to deliver."
+        state_label = "Finished"
+        accent = _MINT
 
     stat_cells = []
     for label, value, bg, fg in (
@@ -191,7 +267,7 @@ def _render_html(items: list[dict], *, date: str, final_state: str) -> str:
 
 <tr><td style="background:{_INK};padding:28px 28px 24px;border-bottom:4px solid {accent};">
   <p style="margin:0;font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:{_MINT};font-weight:700;">Canva &rarr; Drive</p>
-  <h1 style="margin:10px 0 0;font-family:Georgia,'Times New Roman',serif;font-size:30px;font-weight:400;color:#ffffff;letter-spacing:-.02em;">Upload report</h1>
+  <h1 style="margin:10px 0 0;font-family:Georgia,'Times New Roman',serif;font-size:30px;font-weight:400;color:#ffffff;letter-spacing:-.02em;">{_esc(headline)}</h1>
   <p style="margin:10px 0 0;color:#9aa39d;font-size:13px;">{date_line} &nbsp;&middot;&nbsp; {_esc(state_label)} &nbsp;&middot;&nbsp; {total} file{"s" if total != 1 else ""}</p>
 </td></tr>
 

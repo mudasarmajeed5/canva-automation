@@ -68,7 +68,9 @@ class Settings:
     db_path: Path
     log_level: str
     canva_session_ttl_seconds: int = 300
-    # Email (Google SMTP)
+    # Email (Resend primary; Google SMTP fallback)
+    resend_api_key: str = ""
+    email_from: str = "info@mudasarmajeed5.tech"
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
     smtp_user: str = ""
@@ -118,6 +120,8 @@ def get_settings() -> Settings:
         smtp_app_password=_env("SMTP_APP_PASSWORD", ""),
         smtp_from=_env("SMTP_FROM", smtp_user),
         email_fallback_to=_env("EMAIL_FALLBACK_TO", "hsarosh569@gmail.com"),
+        resend_api_key=_env("RESEND_API_KEY", ""),
+        email_from=_env("EMAIL_FROM", "info@mudasarmajeed5.tech"),
         groq_api_key=_env("GROQ_API_KEY", ""),
         gemini_api_key=_env("GEMINI_API_KEY", ""),
         openrouter_api_key=_env("OPENROUTER_API_KEY", ""),

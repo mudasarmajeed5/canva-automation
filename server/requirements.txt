@@ -13,3 +13,6 @@ PyYAML>=6.0
 
 # Module 2 (Playwright bot)
 playwright>=1.47
+
+# Email (Resend)
+resend>=2.50

@@ -134,9 +134,7 @@ def _send_job_email(final_job: dict, settings: Settings, final_state: str) -> No
         entries.append(entry)
 
     date = final_job.get("date") or ""
-    uploaded = sum(1 for r in rows if r.get("state") == "done")
-    suffix = " with errors" if final_state == "done_with_errors" else ""
-    subject = f"Canva upload report — {date} ({uploaded} file(s)){suffix}"
+    subject = emailer.report_subject(date, entries, final_state)
     to = (final_job.get("notify_email") or "").strip() or settings.email_fallback_to
     emailer.send_upload_report(
         to, subject, entries, date=date, final_state=final_state
