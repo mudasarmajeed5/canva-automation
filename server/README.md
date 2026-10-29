@@ -306,3 +306,24 @@ Logs: `journalctl -u canva-automation -f`. Stop: `sudo systemctl stop canva-auto
    is kept and uploaded as a single file.
 3. `DownloadedFile` gained `is_directory: bool = False` (default keeps the old
    interface); the drive stub already returns a folder link for it.
+
+## Strict Drive routing and read-only replay
+
+Uploads now resolve existing folders deterministically by business, publication
+month and content type. Business conflicts and missing folders fail before
+upload. Duplicate matches use the newest modification time across the folder
+and its non-trashed descendants; ties or unavailable activity stop delivery. Paths
+come from Drive metadata. AI routing environment variables are retained for
+legacy tools but do not select upload destinations.
+
+See [ROUTING_RESULTS.md](ROUTING_RESULTS.md) for rules, actual-folder replay
+results, limitations and the no-upload test command. To check a saved job
+against current Drive metadata without uploading:
+
+```bash
+python routing_dry_run.py JOB_ID --output /tmp/routing-report.json
+```
+
+The command prompts for a hidden Google access token and only exposes Drive
+metadata `get` and `list` operations. It does not run Canva, update Sheets, send
+email or change Drive contents. Destination aliases live in `folder_resolver.py`.

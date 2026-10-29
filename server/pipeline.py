@@ -187,6 +187,7 @@ async def _process_row(
             downloaded,
             prior_url,
             drive_folder_id,
+            job_date,
         )
     else:
         upload = await asyncio.to_thread(
@@ -196,6 +197,7 @@ async def _process_row(
             row["task_type"],
             downloaded,
             drive_folder_id,
+            job_date,
         )
 
     # Uploaded + verified on Drive: this file may be deleted at the end of the job.

@@ -221,7 +221,7 @@ def _validate(
         return None
     return {
         "folder_id": folder_id,
-        "path": str(decision.get("path") or match["path"]),
+        "path": str(match["path"]),
         "confidence": confidence,
         "reason": str(decision.get("reason") or ""),
     }

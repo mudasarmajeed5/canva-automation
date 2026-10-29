@@ -1,4 +1,4 @@
-"""Google Drive v3 uploader and data-driven folder router."""
+"""Google Drive v3 uploader with strict deterministic destination checks."""
 
 from __future__ import annotations
 
@@ -16,17 +16,14 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
-import routing
 from config import get_settings
 from models import AutomationError, DownloadedFile, UploadResult
 
 log = logging.getLogger(__name__)
 _RETRYABLE = {429, 500, 502, 503, 504}
-_folder_cache: dict[tuple[str, str], tuple[str, str]] = {}
 
 
 def clear_folder_cache() -> None:
-    _folder_cache.clear()
     try:
         import folder_tree
 
@@ -41,6 +38,7 @@ def upload_and_share(
     task_type: str,
     file: DownloadedFile,
     root_folder_id: str = "",
+    job_date: str = "",
 ) -> UploadResult:
     if not token:
         raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
@@ -55,24 +53,20 @@ def upload_and_share(
             "No Drive folder configured. Paste a Drive folder ID in the app or set ROOT_FOLDER_ID on the server.",
         )
     service = build("drive", "v3", credentials=Credentials(token=token), cache_discovery=False)
-    warnings: list[str] = []
+    from folder_resolver import resolve_target, verify_parent
 
-    target_id, folder_path, ai_used = _ai_route_target(
-        service, root_id, file, account, task_type, settings, warnings
+    target_id, folder_path, warnings = resolve_target(
+        service, root_id, file.name, account, task_type, job_date
     )
-
-    if not ai_used:
-        target_id, folder_path, keyword_warnings = _keyword_route_target(
-            service, root_id, account, task_type, file
-        )
-        warnings.extend(keyword_warnings)
 
     if file.is_directory:
         uploaded_id = _create_folder(service, target_id, file.name)
+        verify_parent(service, uploaded_id, target_id)
         total = 0
         for child in sorted(path for path in file.path.rglob("*") if path.is_file()):
             uploaded = _upload_one(service, child, uploaded_id)
             _verify(service, uploaded[0], child, uploaded[1])
+            verify_parent(service, uploaded[0], uploaded_id)
             total += uploaded[1]
         _share(service, uploaded_id)
         return UploadResult(
@@ -85,68 +79,9 @@ def upload_and_share(
 
     remote_id, size = _upload_one(service, file.path, target_id)
     _verify(service, remote_id, file.path, size)
+    verify_parent(service, remote_id, target_id)
     _share(service, remote_id)
     return UploadResult(remote_id, _link(service, remote_id), folder_path, size, warnings)
-
-
-def _ai_route_target(
-    service,
-    root_id: str,
-    file: DownloadedFile,
-    account: str,
-    task_type: str,
-    settings,
-    warnings: list[str],
-) -> tuple[str, str, bool]:
-    """Return (folder_id, folder_path, used_ai). used_ai False → keyword path."""
-    try:
-        import folder_tree
-        import llm_router
-
-        tree = folder_tree.explore_folder_tree(
-            service,
-            root_id,
-            max_depth=settings.routing_max_depth,
-            max_nodes=settings.routing_max_nodes,
-        )
-        decision = llm_router.route(tree, file.name, account, task_type, settings)
-    except AutomationError:
-        raise
-    except Exception:
-        log.exception("AI folder routing failed; falling back to keyword rules")
-        return "", "", False
-
-    if not decision:
-        return "", "", False
-
-    warnings.append(f"routed by AI (confidence {decision['confidence']:.2f})")
-    return decision["folder_id"], decision["path"], True
-
-
-def _keyword_route_target(
-    service, root_id: str, account: str, task_type: str, file: DownloadedFile
-) -> tuple[str, str, list[str]]:
-    warnings: list[str] = []
-    business_id, business_name = _find_child(service, root_id, routing.account_keyword(account))
-    hint = routing.content_hint(file.name, task_type)
-    if hint:
-        try:
-            target_id, target_name = _find_child(service, business_id, hint)
-        except AutomationError as exc:
-            if exc.code != "DRIVE_FOLDER_NOT_FOUND":
-                raise
-            target_id, target_name = business_id, business_name
-            warnings.append("no subfolder matched, saved in business folder")
-    else:
-        target_id, target_name = business_id, business_name
-    if target_id == business_id and "no subfolder matched, saved in business folder" not in warnings:
-        warnings.append("no subfolder matched, saved in business folder")
-    if not routing.matches(file.name, routing.account_keyword(account)):
-        warnings.append("file name business differs from selected account; routed by account")
-    folder_path = (
-        f"{business_name}/{target_name}" if target_name else business_name
-    )
-    return target_id, folder_path, warnings
 
 
 _DRIVE_FILE_ID_RE = re.compile(r"/d/([A-Za-z0-9_-]{10,})|[?&]id=([A-Za-z0-9_-]{10,})")
@@ -167,6 +102,7 @@ def replace_file(
     file: DownloadedFile,
     drive_url: str,
     root_folder_id: str = "",
+    job_date: str = "",
 ) -> UploadResult:
     """Replace an existing Drive file's contents with a fresh download.
 
@@ -177,12 +113,21 @@ def replace_file(
     file_id = extract_drive_file_id(drive_url)
     if file.is_directory:
         log.info("replace target is a folder download; uploading a new copy instead")
-        return upload_and_share(token, account, task_type, file, root_folder_id)
+        return upload_and_share(token, account, task_type, file, root_folder_id, job_date)
     if not file_id:
         log.info("no Drive file ID found in %r; uploading a new copy", (drive_url or "")[:80])
-        return upload_and_share(token, account, task_type, file, root_folder_id)
+        return upload_and_share(token, account, task_type, file, root_folder_id, job_date)
 
     service = build("drive", "v3", credentials=Credentials(token=token), cache_discovery=False)
+    from folder_resolver import resolve_target, verify_parent
+
+    target_id, folder_path, route_warnings = resolve_target(
+        service, root_folder_id.strip() or get_settings().root_folder_id,
+        file.name, account, task_type, job_date,
+    )
+    # An in-place replacement must not preserve an old filing mistake.
+    # Reject a wrong parent before updating any content.
+    verify_parent(service, file_id, target_id)
     media = MediaFileUpload(
         str(file.path),
         mimetype=mimetypes.guess_type(file.name)[0] or "application/octet-stream",
@@ -203,15 +148,16 @@ def replace_file(
     except AutomationError as exc:
         if exc.code == "DRIVE_FOLDER_NOT_FOUND":
             log.warning("Drive file %s is gone; uploading a replacement copy", file_id)
-            return upload_and_share(token, account, task_type, file, root_folder_id)
+            return upload_and_share(token, account, task_type, file, root_folder_id, job_date)
         raise
+    verify_parent(service, file_id, target_id)
     log.info("replaced Drive file in place: %s (id %s)", file.name, file_id)
     return UploadResult(
         file_id,
         _link(service, file_id),
-        f"replaced:{file.name}",
+        folder_path,
         int(updated.get("size") or file.path.stat().st_size),
-        ["replaced existing Drive file in place"],
+        route_warnings + ["replaced existing Drive file in place"],
     )
 
 
@@ -232,25 +178,6 @@ def _verify_soft(service, file_id: str, path: Path, size: int) -> None:
             "DRIVE_VERIFY_FAILED",
             f"Drive verification failed for {path.name}; the previous file version is kept.",
         )
-
-
-def _find_child(service, parent_id: str, keyword: str) -> tuple[str, str]:
-    key = (parent_id, keyword)
-    if key in _folder_cache:
-        return _folder_cache[key]
-    if not keyword:
-        return parent_id, ""
-    response = _execute(lambda: service.files().list(
-        q=f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        spaces="drive", fields="files(id,name)", pageSize=1000,
-        supportsAllDrives=True, includeItemsFromAllDrives=True,
-    ))
-    for item in response.get("files", []):
-        if routing.matches(item["name"], keyword):
-            result = (item["id"], item["name"])
-            _folder_cache[key] = result
-            return result
-    raise AutomationError("DRIVE_FOLDER_NOT_FOUND", f"No Drive folder matched {keyword!r}.")
 
 
 def _upload_one(service, path: Path, parent_id: str) -> tuple[str, int]:
