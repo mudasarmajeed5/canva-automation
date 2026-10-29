@@ -47,6 +47,7 @@ type Job = {
     file: string | null;
     drive_url: string | null;
     error: string | null;
+    error_code?: string | null;
   }>;
 };
 
@@ -135,6 +136,7 @@ function HomeContent() {
   const [downloadingRow, setDownloadingRow] = useState<number | null>(null);
   const [uploadAll, setUploadAll] = useState(false);
   const [revoking, setRevoking] = useState(false);
+  const [reauthenticating, setReauthenticating] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [automationOnline, setAutomationOnline] = useState<boolean | null>(null);
@@ -151,6 +153,8 @@ function HomeContent() {
   const activeToken = session?.accessToken ?? "";
   const activeEmail = session?.user?.email ?? "";
   const sessionLoading = status === "loading";
+  const googleTokenExpired = /token.*expired|sign in again/i.test(error) ||
+    !!job?.rows.some((row) => row.error_code === "TOKEN_EXPIRED" || /token.*expired|sign in again/i.test(row.error ?? ""));
 
   useEffect(() => {
     if (!activeEmail || settingsForEmail.current === activeEmail) return;
@@ -203,6 +207,18 @@ function HomeContent() {
     return () => { mounted = false; };
   }, []);
 
+  function cancelAutoSync() {
+    if (autoSyncTimer.current !== null) {
+      clearTimeout(autoSyncTimer.current);
+      autoSyncTimer.current = null;
+    }
+  }
+
+  function resetDirty() {
+    dirtyStamp.current.clear();
+    setDirtyRows(new Set());
+  }
+
   const fetchRows = useCallback(async () => {
     if (!activeToken || !date || !sheetId.trim()) return;
     setLoadingRows(true);
@@ -232,7 +248,8 @@ function HomeContent() {
 
   useEffect(() => {
     if (!activeToken) return;
-    fetchRows();
+    const timer = window.setTimeout(() => void fetchRows(), 0);
+    return () => window.clearTimeout(timer);
   }, [activeToken, fetchRows]);
 
   useEffect(() => {
@@ -271,18 +288,6 @@ function HomeContent() {
 
   function removeNewEntry(index: number) {
     setNewEntries((cur) => (cur.length === 1 ? cur : cur.filter((_, i) => i !== index)));
-  }
-
-  function cancelAutoSync() {
-    if (autoSyncTimer.current !== null) {
-      clearTimeout(autoSyncTimer.current);
-      autoSyncTimer.current = null;
-    }
-  }
-
-  function resetDirty() {
-    dirtyStamp.current.clear();
-    setDirtyRows(new Set());
   }
 
   function markDirty(rowNumber: number) {
@@ -600,6 +605,24 @@ function HomeContent() {
     }
   }
 
+  async function handleReauthenticate() {
+    if (reauthenticating || revoking) return;
+    setReauthenticating(true);
+    setError("");
+    try {
+      // Start a fresh OAuth exchange without revoking the existing grant.
+      await signIn("google", { redirectTo: "/" }, {
+        prompt: "consent",
+        access_type: "offline",
+        ...(activeEmail ? { login_hint: activeEmail } : {}),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reconnect Google. Try again.");
+    } finally {
+      setReauthenticating(false);
+    }
+  }
+
   async function handleRevoke() {
     if (!activeToken) return;
     setError("");
@@ -799,13 +822,21 @@ function HomeContent() {
                   Connected as <strong>{activeEmail || "your Google account"}</strong>
                 </p>
                 <p className="muted" style={{ marginTop: 8 }}>
-                  Sheets and Drive access is active for this session.
+                  {googleTokenExpired ? "Your Google session expired. Reconnect, then retry the failed tasks." : "Reconnect Google whenever you need to renew Sheets and Drive access."}
                 </p>
                 <button
                   type="button"
                   className="google-button"
+                  onClick={handleReauthenticate}
+                  disabled={reauthenticating || revoking}
+                >
+                  {reauthenticating ? "Reconnecting…" : "Reconnect Google"} <span>↗</span>
+                </button>
+                <button
+                  type="button"
+                  className="google-button"
                   onClick={handleRevoke}
-                  disabled={revoking}
+                  disabled={revoking || reauthenticating}
                   style={{ marginTop: 16 }}
                 >
                   {revoking ? "Revoking…" : "Revoke access"} <span>✕</span>
@@ -1007,9 +1038,19 @@ function HomeContent() {
         </>
       )}
 
-      {(message || error || oauthError) && (
-        <div className={`notice ${error || oauthError ? "notice-error" : ""}`} role="status">
-          {error || (oauthError ? `Google sign-in failed: ${oauthError}` : message)}
+      {(message || error || oauthError || googleTokenExpired) && (
+        <div className={`notice ${error || oauthError || googleTokenExpired ? "notice-error" : ""}`} role="status">
+          {error || (oauthError ? `Google sign-in failed: ${oauthError}` : googleTokenExpired ? "Google access expired. Reconnect Google, then retry the failed tasks." : message)}
+          {googleTokenExpired && (
+            <button
+              type="button"
+              className="google-button"
+              onClick={handleReauthenticate}
+              disabled={reauthenticating || revoking}
+            >
+              {reauthenticating ? "Reconnecting…" : "Reconnect Google"} <span>↗</span>
+            </button>
+          )}
         </div>
       )}
       <footer><span>Events / Canva automation</span><span>One batch at a time · Ubuntu worker</span></footer>
