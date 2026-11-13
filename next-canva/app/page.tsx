@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useDraftStore, useStoredState } from "../lib/draft-store";
 import { useSearchParams } from "next/navigation";
 import { signIn, signOut, useSession } from "next-auth/react";
 
@@ -104,6 +105,21 @@ function today() {
     .replace(/ /g, "-");
 }
 
+function calendarValue(date: string) {
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
+function sheetDate(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric" })
+    .format(new Date(year, month - 1, day)).replace(/ /g, "-");
+}
+
+const isSheetDate = (value: unknown): value is string =>
+  typeof value === "string" && /^\d{2}-[A-Za-z]{3,4}-\d{4}$/.test(value) && !!calendarValue(value);
+
 function defaultNewEntry(): NewEntry {
   return {
     account: ACCOUNTS[0][1],
@@ -120,14 +136,44 @@ function statusOptions(current: string): string[] {
     : [...STATUSES, current];
 }
 
+const emptyLinks = () => ({} as Record<number, string>);
+const emptyEdits = () => ({} as Record<number, SheetRow>);
+const initialEntries = () => [defaultNewEntry()];
+const emptyString = () => "";
+const isString = (value: unknown): value is string => typeof value === "string";
+const isStringRecord = (value: unknown): value is Record<number, string> =>
+  !!value && typeof value === "object" && !Array.isArray(value) && Object.values(value).every(isString);
+const isEntry = (value: unknown): value is NewEntry =>
+  !!value && typeof value === "object" &&
+  ["account", "task_type", "task_description", "status", "canva_link"].every(
+    (field) => typeof (value as Record<string, unknown>)[field] === "string",
+  );
+const isEntries = (value: unknown): value is NewEntry[] =>
+  Array.isArray(value) && value.length > 0 && value.every(isEntry);
+const isEdits = (value: unknown): value is Record<number, SheetRow> =>
+  !!value && typeof value === "object" && !Array.isArray(value) && Object.values(value).every(
+    (row) => !!row && typeof row === "object" && typeof row.row_number === "number" &&
+      ["date", "account", "task_type", "task_description", "status", "post_link"].every(
+        (field) => typeof row[field] === "string",
+      ),
+  );
+
 function HomeContent() {
+  const { data: session, status } = useSession();
+  if (status === "loading") return <main className="shell">Loading desk…</main>;
+  return <Desk key={session?.user?.email ?? "guest"} />;
+}
+
+function Desk() {
+  const storageError = useDraftStore((state) => state.storageError);
   const searchParams = useSearchParams();
   const { data: session, status } = useSession();
-  const [date, setDate] = useState(today);
+  const storagePrefix = `canva-desk:v1:${session?.user?.email ?? "guest"}`;
+  const [date, setDate, dateReady] = useStoredState(`${storagePrefix}:date`, today, isSheetDate);
   const [rows, setRows] = useState<SheetRow[]>([]);
   const [rowsLoaded, setRowsLoaded] = useState(false);
-  const [newEntries, setNewEntries] = useState<NewEntry[]>([defaultNewEntry()]);
-  const [canvaLinks, setCanvaLinks] = useState<Record<number, string>>({});
+  const [rowsLoadError, setRowsLoadError] = useState("");
+  const [newEntries, setNewEntries, entriesReady] = useStoredState(`${storagePrefix}:entries`, initialEntries, isEntries);
   const [dirtyRows, setDirtyRows] = useState<Set<number>>(new Set());
   const [job, setJob] = useState<Job | null>(null);
   const [loadingRows, setLoadingRows] = useState(false);
@@ -140,14 +186,25 @@ function HomeContent() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [automationOnline, setAutomationOnline] = useState<boolean | null>(null);
-  const [sheetId, setSheetId] = useState("");
-  const [driveFolderId, setDriveFolderId] = useState("");
+  const [sheetId, setSheetId, sheetReady] = useStoredState(`${storagePrefix}:sheet`, emptyString, isString);
+  const [driveFolderId, setDriveFolderId, folderReady] = useStoredState(`${storagePrefix}:folder`, emptyString, isString);
+  const rowStoragePrefix = `${storagePrefix}:${encodeURIComponent(sheetId.trim())}:${encodeURIComponent(date)}`;
+  const [canvaLinks, setCanvaLinks, linksReady] = useStoredState(`${rowStoragePrefix}:links`, emptyLinks, isStringRecord);
+  const [rowEdits, setRowEdits, editsReady] = useStoredState(`${rowStoragePrefix}:edits`, emptyEdits, isEdits);
+  const rowEditsRef = useRef(rowEdits);
+  rowEditsRef.current = rowEdits;
+  const draftsReady = dateReady && sheetReady && folderReady && entriesReady && linksReady && editsReady;
   const settingsForEmail = useRef("");
   const savedSettings = useRef({ sheet: "", folder: "" });
   const rowsRef = useRef<SheetRow[]>([]);
   const dirtyStamp = useRef(new Map<number, number>());
   const autoSyncTimer = useRef<number | null>(null);
   const syncingRef = useRef(false);
+  const rowsRequest = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    if (autoSyncTimer.current !== null) window.clearTimeout(autoSyncTimer.current);
+  }, [rowStoragePrefix]);
 
   const oauthError = searchParams.get("error") ?? "";
   const activeToken = session?.accessToken ?? "";
@@ -157,25 +214,25 @@ function HomeContent() {
     !!job?.rows.some((row) => row.error_code === "TOKEN_EXPIRED" || /token.*expired|sign in again/i.test(row.error ?? ""));
 
   useEffect(() => {
-    if (!activeEmail || settingsForEmail.current === activeEmail) return;
-    settingsForEmail.current = activeEmail;
+    if (!sheetReady || !folderReady || !activeEmail || settingsForEmail.current === activeEmail) return;
     let mounted = true;
     (async () => {
       try {
-        const response = await fetch(`/api/settings?email=${encodeURIComponent(activeEmail)}`);
+        const response = await fetch(`/api/settings?email=${encodeURIComponent(activeEmail)}`, { cache: "no-store" });
         const body = await readJson(response);
         if (!mounted || !response.ok) return;
         const nextSheet = (body.sheet_id ?? "").trim();
         const nextFolder = (body.drive_folder_id ?? "").trim();
-        setSheetId(nextSheet);
-        setDriveFolderId(nextFolder);
+        settingsForEmail.current = activeEmail;
+        setSheetId((current) => current.trim() ? current : nextSheet);
+        setDriveFolderId((current) => current.trim() ? current : nextFolder);
         savedSettings.current = { sheet: nextSheet, folder: nextFolder };
       } catch {
         /* backend unreachable — keep whatever is in the inputs */
       }
     })();
     return () => { mounted = false; };
-  }, [activeEmail]);
+  }, [activeEmail, sheetReady, folderReady, setSheetId, setDriveFolderId]);
 
   async function persistSettings() {
     if (!activeEmail) return;
@@ -220,36 +277,60 @@ function HomeContent() {
   }
 
   const fetchRows = useCallback(async () => {
-    if (!activeToken || !date || !sheetId.trim()) return;
+    if (!draftsReady || !activeToken || !date || !sheetId.trim()) return;
+    rowsRequest.current?.abort();
+    const controller = new AbortController();
+    rowsRequest.current = controller;
     setLoadingRows(true);
+    setRowsLoadError("");
     setError("");
     try {
       const params = new URLSearchParams({ date, token: activeToken, sheet_id: sheetId.trim() });
-      const response = await fetch(`/api/sheet-rows?${params}`);
+      const response = await fetch(`/api/sheet-rows?${params}`, {
+        cache: "no-store", signal: controller.signal,
+      });
       const body = await readJson(response);
+      if (controller.signal.aborted) return;
       if (!response.ok) throw new Error(body.message || body.error || "Could not load rows.");
-      const nextRows = body.rows || [];
+      if (!Array.isArray(body.rows)) throw new Error("The server did not return Sheet records. Refresh to try again.");
+      const nextRows = body.rows.map((row) => {
+        const draft = rowEditsRef.current[row.row_number];
+        return draft ? { ...row, account: draft.account, task_type: draft.task_type,
+          task_description: draft.task_description, status: draft.status } : row;
+      });
       rowsRef.current = nextRows;
       setRows(nextRows);
       setRowsLoaded(true);
       cancelAutoSync();
       resetDirty();
+      for (const row of nextRows) {
+        if (rowEditsRef.current[row.row_number]) markDirty(row.row_number);
+      }
+      if (dirtyStamp.current.size) scheduleAutoSync();
       const links: Record<number, string> = {};
       for (const row of body.rows || []) {
         if (!row.post_link) links[row.row_number] = "";
       }
       setCanvaLinks((prev) => ({ ...links, ...prev }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load rows.");
+      if (controller.signal.aborted) return;
+      const message = err instanceof Error ? err.message : "Could not load rows.";
+      setRowsLoadError(message);
+      setError(message);
     } finally {
-      setLoadingRows(false);
+      if (!controller.signal.aborted) setLoadingRows(false);
     }
-  }, [activeToken, date, sheetId]);
+  // Read drafts through a ref; the auto-save scheduler must not trigger reloads.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeToken, date, sheetId, draftsReady, setCanvaLinks]);
 
   useEffect(() => {
     if (!activeToken) return;
     const timer = window.setTimeout(() => void fetchRows(), 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      rowsRequest.current?.abort();
+    };
   }, [activeToken, fetchRows]);
 
   useEffect(() => {
@@ -278,6 +359,21 @@ function HomeContent() {
   );
   const jobRunning = !!job && !["done", "done_with_errors", "failed"].includes(job.state);
 
+  const contextBusy = adding || syncing || uploadAll || downloadingRow !== null;
+
+  function clearRowContext() {
+    rowsRequest.current?.abort();
+    cancelAutoSync();
+    resetDirty();
+    rowsRef.current = [];
+    setRows([]);
+    setRowsLoaded(false);
+    setRowsLoadError("");
+    setLoadingRows(false);
+    setMessage("");
+    setError("");
+  }
+
   function updateNewEntry(index: number, patch: Partial<NewEntry>) {
     setNewEntries((cur) => cur.map((e, i) => (i === index ? { ...e, ...patch } : e)));
   }
@@ -300,6 +396,11 @@ function HomeContent() {
     for (const [rowNumber, stamp] of snapshot) {
       if (dirtyStamp.current.get(rowNumber) === stamp) {
         dirtyStamp.current.delete(rowNumber);
+        setRowEdits((current) => {
+          const next = { ...current };
+          delete next[rowNumber];
+          return next;
+        });
         changed = true;
       }
     }
@@ -367,11 +468,13 @@ function HomeContent() {
   }
 
   function updateRow(rowNumber: number, field: keyof SheetRow, value: string) {
-    setRows((cur) => {
-      const next = cur.map((r) => (r.row_number === rowNumber ? { ...r, [field]: value } : r));
-      rowsRef.current = next;
-      return next;
-    });
+    const next = rowsRef.current.map((row) =>
+      row.row_number === rowNumber ? { ...row, [field]: value } : row,
+    );
+    rowsRef.current = next;
+    setRows(next);
+    const current = rowsRef.current.find((row) => row.row_number === rowNumber);
+    if (current) setRowEdits((edits) => ({ ...edits, [rowNumber]: { ...current, [field]: value } }));
     markDirty(rowNumber);
     scheduleAutoSync();
   }
@@ -445,6 +548,9 @@ function HomeContent() {
         }));
 
       if (downloadRows.length) {
+        setCanvaLinks((current) => ({ ...current, ...Object.fromEntries(
+          downloadRows.map((row) => [row.row_number, row.canva_link]),
+        ) }));
         try {
           const dlResponse = await fetch("/api/download", {
             method: "POST",
@@ -666,6 +772,8 @@ function HomeContent() {
 
       <div className="rule" />
 
+      {storageError && <p className="notice notice-error" role="alert">Your browser could not save drafts. Keep this page open and enable browser storage before refreshing.</p>}
+
       <div className="workspace">
         <div className="card intake-card">
           <div className="card-heading">
@@ -679,15 +787,31 @@ function HomeContent() {
           <div className="field-grid">
             <label className="date-field">
               Calendar date
-              <input value={date} onChange={(e) => setDate(e.target.value)} placeholder="21-Oct-2026" required />
-              <small>Tasks are added to and loaded from the Sheet for this date.</small>
+              <div className="calendar-controls">
+                <input
+                  type="date"
+                  aria-label="Calendar date"
+                  value={calendarValue(date)}
+                  onChange={(event) => {
+                    if (!event.target.value) return;
+                    clearRowContext();
+                    setDate(sheetDate(event.target.value));
+                  }}
+                  disabled={!draftsReady || contextBusy}
+                  required
+                />
+                <button type="button" className="calendar-today" disabled={!draftsReady || contextBusy}
+                  onClick={() => { clearRowContext(); setDate(today()); }}>Today</button>
+              </div>
+              <small>Choose an earlier date to finish late uploads. Tasks are loaded and added for the selected day.</small>
             </label>
 
             <label className="date-field">
               Google Sheet ID
               <input
                 value={sheetId}
-                onChange={(e) => setSheetId(e.target.value)}
+                onChange={(e) => { clearRowContext(); setSheetId(e.target.value); }}
+                disabled={!draftsReady || contextBusy}
                 onBlur={persistSettings}
                 placeholder="ID from the sheet URL — between /d/ and /edit"
                 spellCheck={false}
@@ -739,6 +863,7 @@ function HomeContent() {
           </div>
 
           <form onSubmit={handleAdd}>
+            <fieldset className="draft-fields" disabled={!draftsReady || adding}>
             <div className="links-heading">
               <div>
                 <p className="section-label">New task entries</p>
@@ -803,6 +928,7 @@ function HomeContent() {
                 {adding ? "Adding…" : "Add to Sheet"} <span>→</span>
               </button>
             </div>
+          </fieldset>
           </form>
         </div>
 
@@ -878,16 +1004,24 @@ function HomeContent() {
         </aside>
       </div>
 
-      {(loadingRows || rowsLoaded || rows.length > 0) && (
+      {(activeToken && sheetId.trim()) && (
         <>
           <div className="rule" />
           <section className="card" style={{ marginTop: "1rem" }}>
-            <div className="card-heading">
+            <div className="card-heading records-heading">
               <div>
                 <p className="section-label">Existing tasks</p>
                 <h2>Rows for {date}</h2>
               </div>
-              <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+              <div className="records-actions">
+                <button
+                  type="button"
+                  className="google-button"
+                  onClick={() => void fetchRows()}
+                  disabled={loadingRows || !draftsReady}
+                >
+                  Refresh records
+                </button>
                 {loadingRows && (
                   <span className="step-mark load-pill" role="status" aria-live="polite">
                     <span className="load-spinner" aria-hidden="true" />
@@ -930,8 +1064,12 @@ function HomeContent() {
                   </div>
                 ))}
               </div>
+            ) : rowsLoadError ? (
+              <p className="empty-copy" role="alert">Could not load Sheet records: {rowsLoadError}</p>
+            ) : !rowsLoaded ? (
+              <p className="empty-copy">Preparing to load Sheet records…</p>
             ) : rows.length === 0 ? (
-              <p className="empty-copy">No tasks on the sheet for {date} yet. Add them in the card above.</p>
+              <p className="empty-copy">No tasks match {date} in the selected Sheet. Check the calendar date and Sheet ID above, then refresh records.</p>
             ) : (
               <div className={`entry-list${loadingRows ? " is-loading" : ""}`} aria-busy={loadingRows || undefined}>
                 {rows.map((row) => {

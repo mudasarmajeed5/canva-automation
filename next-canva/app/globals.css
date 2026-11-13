@@ -84,3 +84,14 @@ small { font-size: 10px; letter-spacing: 0; text-transform: none; font-weight: 4
 footer { display: flex; justify-content: space-between; color: var(--muted); padding-top: 30px; font-size: 9px; }
 @media (max-width: 800px) { .shell { padding: 28px 18px; } .masthead { flex-direction: column; } .workspace { grid-template-columns: 1fr; } .entry-selects { grid-template-columns: 1fr; gap: 8px; } .submit-row { align-items: stretch; flex-direction: column; } .primary-button { justify-content: center; } footer { gap: 15px; flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+
+.draft-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.calendar-controls { display: flex; gap: 8px; }
+.calendar-controls input { min-width: 0; flex: 1; }
+.calendar-today { border: 1px solid var(--line); background: white; color: var(--green); padding: 10px; cursor: pointer; font-size: 12px; }
+.calendar-today:hover { border-color: var(--green); }
+.calendar-today:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.calendar-today:disabled { opacity: .5; cursor: default; }
+.records-heading { flex-wrap: wrap; gap: 14px; }
+.records-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.records-actions .google-button { width: auto; margin: 0; }
