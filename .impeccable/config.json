@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "arial",
+        "createdAt": "2026-11-13T18:50:29.095Z",
+        "reason": "Agent decision: existing Arial body text suits this operational form interface; preserve its familiar typography while improving workflow and accessibility."
+      }
+    ]
+  }
+}

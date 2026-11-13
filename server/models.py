@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -36,7 +36,10 @@ DEFAULT_STATUS = "Not Started"
 
 ALLOWED_CANVA_HOSTS: frozenset[str] = frozenset({"canva.com", "www.canva.com", "canva.link"})
 
-_DATE_RE = re.compile(r"^(\d{1,2})-([A-Za-z]{3})-(\d{4})$")
+_DATE_RE = re.compile(r"^(\d{1,2})[-/\s]+([A-Za-z]+)[-/\s]+(\d{4})$")
+_MONTH_FIRST_DATE_RE = re.compile(r"^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$")
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
+_NUMERIC_DATE_RE = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$")
 _MONTHS = {
     "jan": 1,
     "feb": 2,
@@ -51,22 +54,58 @@ _MONTHS = {
     "nov": 11,
     "dec": 12,
 }
+_MONTH_NAMES = {
+    "jan": {"jan", "january"}, "feb": {"feb", "february"},
+    "mar": {"mar", "march"}, "apr": {"apr", "april"},
+    "may": {"may"}, "jun": {"jun", "june"}, "jul": {"jul", "july"},
+    "aug": {"aug", "august"}, "sep": {"sep", "sept", "september"},
+    "oct": {"oct", "october"}, "nov": {"nov", "november"},
+    "dec": {"dec", "december"},
+}
+
+
+def normalize_sheet_date(value: str) -> str:
+    """Normalize explicit ISO, day-first numeric, or named-month dates.
+
+    Slash dates are day-first (UK convention); use ISO for unambiguous
+    year-first input. Returns the Sheet's canonical D-MMM-YYYY spelling.
+    """
+    raw = str(value or "").strip()
+    match = _ISO_DATE_RE.fullmatch(raw)
+    if match:
+        year, month, day = map(int, match.groups())
+    else:
+        match = _NUMERIC_DATE_RE.fullmatch(raw)
+        if match:
+            day, month, year = map(int, match.groups())
+        else:
+            match = _DATE_RE.fullmatch(raw)
+            month_first = _MONTH_FIRST_DATE_RE.fullmatch(raw)
+            if match:
+                day, month_name, year_text = match.groups()
+            elif month_first:
+                month_name, day, year_text = month_first.groups()
+            else:
+                raise ValueError("Use a date such as 21-Oct-2026, 21/10/2026, or 2026-10-21.")
+            month = next((number for abbreviation, names in _MONTH_NAMES.items()
+                          if month_name.lower() in names
+                          for number in [_MONTHS[abbreviation]]), None)
+            if month is None:
+                raise ValueError("Unrecognized month in date.")
+            day, year = int(day), int(year_text)
+    try:
+        parsed = date(year, month, day)
+    except ValueError as exc:
+        raise ValueError("Date is not a valid calendar day.") from exc
+    return f"{parsed.day:02d}-{parsed.strftime('%b')}-{parsed.year}"
 
 
 def is_valid_sheet_date(value: str) -> bool:
-    """Return True for dates written as ``D-MMM-YYYY`` (e.g. ``21-Oct-2026``)."""
-    match = _DATE_RE.match(value.strip())
-    if not match:
-        return False
-    day, month_name, year = match.groups()
-    month = _MONTHS.get(month_name.lower())
-    if month is None:
-        return False
     try:
-        date(int(year), month, int(day))
-    except ValueError:
+        normalize_sheet_date(value)
+        return True
+    except (TypeError, ValueError):
         return False
-    return True
 
 
 def is_valid_canva_link(value: str) -> bool:
@@ -237,9 +276,7 @@ class JobRequest(BaseModel):
     @field_validator("date")
     @classmethod
     def _check_date(cls, value: str) -> str:
-        if not is_valid_sheet_date(value):
-            raise ValueError("date must use the D-MMM-YYYY format, e.g. 21-Oct-2026")
-        return value.strip()
+        return normalize_sheet_date(value)
 
     @model_validator(mode="after")
     def _check_unique_row_ids(self) -> "JobRequest":
@@ -315,9 +352,7 @@ class CreateRowsRequest(BaseModel):
     @field_validator("date")
     @classmethod
     def _check_date(cls, value: str) -> str:
-        if not is_valid_sheet_date(value):
-            raise ValueError("date must use the D-MMM-YYYY format, e.g. 21-Oct-2026")
-        return value.strip()
+        return normalize_sheet_date(value)
 
 
 class UpdateRowsRequest(BaseModel):
@@ -381,9 +416,7 @@ class DownloadRequest(BaseModel):
     @field_validator("date")
     @classmethod
     def _check_date(cls, value: str) -> str:
-        if not is_valid_sheet_date(value):
-            raise ValueError("date must use the D-MMM-YYYY format, e.g. 21-Oct-2026")
-        return value.strip()
+        return normalize_sheet_date(value)
 
     @field_validator("notify_email")
     @classmethod

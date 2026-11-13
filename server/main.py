@@ -22,6 +22,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 
+import idempotency
 import canva_bot
 import cleanup
 import sheets
@@ -401,6 +402,8 @@ async def get_sheet_rows(
 ) -> JSONResponse:
     try:
         rows = await asyncio.to_thread(sheets.read_rows, token, date, sheet_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": "invalid_date", "message": str(exc)})
     except AutomationError as exc:
         return JSONResponse(status_code=_error_status(exc), content={"error": exc.code, "message": exc.message})
     except Exception:
@@ -412,8 +415,7 @@ async def get_sheet_rows(
     return JSONResponse(status_code=200, content={"rows": rows})
 
 
-@app.post("/api/sheet-rows")
-async def create_sheet_rows(
+async def _create_sheet_rows(
     payload: CreateRowsRequest,
     _: None = Depends(require_secret),
 ) -> JSONResponse:
@@ -457,8 +459,7 @@ async def patch_sheet_rows(
     return JSONResponse(status_code=200, content={"updated": len(updates)})
 
 
-@app.post("/api/download")
-async def queue_download(
+async def _queue_download(
     payload: DownloadRequest,
     request: Request,
     _: None = Depends(require_secret),
@@ -510,3 +511,35 @@ async def queue_download(
         status_code=202,
         content={"job_id": job_id, "state": "queued", "rows_queued": len(rows)},
     )
+
+
+@app.post("/api/sheet-rows")
+async def create_sheet_rows(payload: CreateRowsRequest, request: Request, _: None = Depends(require_secret)):
+    return await idempotency.execute(request, payload, lambda: _create_sheet_rows(payload))
+
+@app.post("/api/download")
+async def queue_download(payload: DownloadRequest, request: Request, _: None = Depends(require_secret)):
+    return await idempotency.execute(request, payload, lambda: _queue_download(payload, request))
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(job_id: str, request: Request, _: None = Depends(require_secret)) -> JSONResponse:
+    """Resume unfinished tasks with a newly supplied Google credential."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_request", "message": "Send a JSON body with google_access_token."})
+    token = body.get("google_access_token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or len(token.strip()) < 10:
+        return JSONResponse(status_code=400, content={"error": "invalid_token", "message": "Reconnect Google before retrying."})
+    store: JobStore = request.app.state.store
+    worker: Worker = request.app.state.worker
+    try:
+        count = store.retry_failed_job(job_id)
+    except KeyError:
+        return JSONResponse(status_code=404, content={"error": "job_not_found", "message": "This job is no longer available."})
+    except ValueError as exc:
+        return JSONResponse(status_code=409, content={"error": "job_not_retryable", "message": str(exc)})
+    remember_token(job_id, token.strip())
+    worker.enqueue(job_id)
+    return JSONResponse(status_code=202, content={"job_id": job_id, "state": "queued", "rows_retried": count})

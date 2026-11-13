@@ -26,6 +26,36 @@ def test_date_block_bounds_stops_at_empty_date():
     assert bounds27 == (26, 26), bounds27
 
 
+def test_date_normalization_accepts_supported_formats():
+    from models import normalize_sheet_date
+
+    for value in ("12-Sep-2026", "12-Sept-2026", "12-September-2026", "12/09/2026", "2026-09-12"):
+        assert normalize_sheet_date(value) == "12-Sep-2026"
+    assert normalize_sheet_date("September 12, 2026") == "12-Sep-2026"
+    assert normalize_sheet_date("Nov 3 2026") == "03-Nov-2026"
+
+
+def test_date_normalization_rejects_invalid_dates():
+    from models import normalize_sheet_date
+
+    for value in ("31/02/2026", "2026-13-01", "Sep-12-2026", "Novembergarbage 12, 2026", "12-Novembergarbage-2026", "not a date"):
+        try:
+            normalize_sheet_date(value)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted invalid date {value!r}")
+
+
+def test_block_rows_normalizes_cells_and_includes_repeated_blocks():
+    cells = [
+        ["12-Sept-2026", "A", "T", "first", "Done", ""],
+        ["13-Sep-2026", "A", "T", "other", "Done", ""],
+        ["2026-09-12", "B", "T", "second block", "Done", ""],
+    ]
+    rows = sheets._block_rows(cells, HEADERS, "12/09/2026")
+    assert [number for number, _ in rows] == [2, 4]
+
+
 def test_row_has_real_content_ignores_status_only():
     hollow = ["", "", "", "", "Not Started", ""]
     real = ["26-Oct-2026", "", "", "", "Done", ""]

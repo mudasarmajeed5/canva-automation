@@ -69,7 +69,7 @@ class Worker:
             except Exception:
                 log.exception("job %s crashed", job_id)
                 try:
-                    self.store.set_job_state(job_id, "failed")
+                    self._fail_job(job_id)
                 except Exception:
                     log.exception("could not mark job %s failed", job_id)
             finally:
@@ -114,7 +114,18 @@ class Worker:
             )
         except Exception:
             log.exception("pipeline failed for job %s", job_id)
-            self.store.set_job_state(job_id, "failed")
+            self._fail_job(job_id)
+
+    def _fail_job(self, job_id: str) -> None:
+        job = self.store.get_job(job_id)
+        for row in (job or {}).get("rows", []):
+            if row["state"] not in {"done", "failed"}:
+                self.store.set_row_state(
+                    job_id, row["row_id"], "failed",
+                    error="Processing stopped unexpectedly. Retry this job to continue unfinished tasks.",
+                    error_code="WORKER_FAILED",
+                )
+        self.store.set_job_state(job_id, "failed")
 
     def _on_row_progress(self, position: int, total: int) -> None:
         self.current_row = position

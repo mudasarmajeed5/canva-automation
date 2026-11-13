@@ -310,6 +310,29 @@ class JobStore:
             row = self._conn.execute("SELECT COUNT(*) AS total FROM jobs").fetchone()
         return int(row["total"])
 
+    def retry_failed_job(self, job_id: str) -> int:
+        """Atomically reserve a failed job for retry, preserving completed uploads."""
+        with self._lock, self._conn:
+            job = self._conn.execute("SELECT state FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if job is None:
+                raise KeyError(job_id)
+            if job["state"] in {"queued", "running"}:
+                raise ValueError("This job is already queued or running.")
+            count = self._conn.execute(
+                "SELECT COUNT(*) FROM job_rows WHERE job_id = ? AND state != 'done'", (job_id,)
+            ).fetchone()[0]
+            if not count:
+                raise ValueError("This job has no failed tasks to retry.")
+            self._conn.execute(
+                "UPDATE job_rows SET state = 'pending', error = NULL, error_code = NULL "
+                "WHERE job_id = ? AND state != 'done'", (job_id,)
+            )
+            self._conn.execute(
+                "UPDATE jobs SET state = 'queued', updated_at = ? WHERE job_id = ?",
+                (utcnow_iso(), job_id),
+            )
+            return count
+
 
 def _job_to_dict(job: sqlite3.Row, rows: Iterable[sqlite3.Row]) -> dict:
     return {

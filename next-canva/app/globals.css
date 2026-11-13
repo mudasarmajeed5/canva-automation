@@ -63,7 +63,7 @@ small { font-size: 10px; letter-spacing: 0; text-transform: none; font-weight: 4
 .progress-summary strong { font-family: Georgia, serif; font-size: 42px; font-weight: 400; }
 .progress-summary span { color: var(--muted); font-size: 12px; }
 .progress-track { height: 5px; background: #e4e8e1; margin-bottom: 14px; }
-.progress-track span { display: block; height: 100%; background: var(--green); transition: width .4s ease; }
+.progress-track span { display: block; height: 100%; width: 100%; background: var(--green); transform-origin: left; transition: transform .4s ease; }
 .row-statuses { display: grid; gap: 11px; color: var(--muted); font-size: 12px; }
 .mini-dot { width: 6px; height: 6px; background: var(--line); }
 .mini-dot.done { background: var(--green); }
@@ -95,3 +95,23 @@ footer { display: flex; justify-content: space-between; color: var(--muted); pad
 .records-heading { flex-wrap: wrap; gap: 14px; }
 .records-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .records-actions .google-button { width: auto; margin: 0; }
+.entry-text-field { width: 100%; gap: 5px; color: var(--ink); font-size: 11px; }
+.entry-text-field input { width: 100%; }
+.coral-text, .row-number { color: #a8442f; }
+.muted, small { color: #56615b; }
+.worker-note { color: #a8442f; }
+input, select { min-width: 0; }
+input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+@media (max-width: 800px) { .records-actions { width: 100%; } .records-actions > * { flex: 1 1 auto; } .entry-row { min-width: 0; } }
+
+.working-day { margin: 20px 0; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.working-day .date-field { max-width: 480px; margin: 0; }
+.setup-settings { margin-bottom: 20px; }
+.setup-settings summary { cursor: pointer; color: var(--green); font-weight: 700; padding: 12px 0; }
+.task-error { color: #9b3c27; margin: 6px 0; }
+:root { --muted: #56615b; --coral: #ac482f; }
+small { font-size: 12px; line-height: 1.5; }
+.entry-fields label { font-size: 11px; }
+h1 { letter-spacing: -.04em; }
+.workspace { margin-top: 24px; }
+@media(max-width:800px) { .calendar-controls { flex-wrap: wrap; } .calendar-controls input { flex-basis: 100%; } }

@@ -62,7 +62,7 @@ export async function POST(request: Request) {
   const text = await request.text();
   return proxyJson(new URL("/api/sheet-rows", config.backend), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Idempotency-Key": request.headers.get("Idempotency-Key") ?? "" },
     body: text,
   }, config.secret);
 }
@@ -75,7 +75,7 @@ export async function PATCH(request: Request) {
   const text = await request.text();
   return proxyJson(new URL("/api/sheet-rows", config.backend), {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Idempotency-Key": request.headers.get("Idempotency-Key") ?? "" },
     body: text,
   }, config.secret);
 }

@@ -14,7 +14,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from config import get_settings
-from models import AutomationError, RowInput
+from models import AutomationError, RowInput, normalize_sheet_date
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ def read_rows(token: str, date: str, sheet_id: str = "") -> list[dict]:
     A block starts at the first row whose Date cell equals ``date`` and runs
     until the next row that carries a different date.
     """
+    date = normalize_sheet_date(date)
     if not token:
         raise AutomationError("TOKEN_EXPIRED", "Google access token is missing.")
 
@@ -400,10 +401,16 @@ def _date_block_bounds(dates: list[str], target: str) -> tuple[int, int] | None:
     at the last '||' continuation (or repeat of ``target``). An empty Date
     cell ends the block so hollow rows between dates never join the block.
     """
+    target = normalize_sheet_date(target)
     start: int | None = None
     end: int | None = None
     for index, raw in enumerate(dates):
         cell = (raw or "").strip()
+        if cell and cell != CONTINUATION:
+            try:
+                cell = normalize_sheet_date(cell)
+            except ValueError:
+                pass
         if start is None:
             if cell == target:
                 start = index
@@ -423,18 +430,23 @@ def _block_rows(
     cells: list[list[str]], headers: dict[str, int], target: str
 ) -> list[tuple[int, list[str]]]:
     """``(sheet_row, cells)`` for the content rows of ``target``'s block."""
+    target = normalize_sheet_date(target)
     dates = [row[headers["Date"]].strip() for row in cells]
-    bounds = _date_block_bounds(dates, target)
-    if bounds is None:
-        return []
-    start, end = bounds
     rows: list[tuple[int, list[str]]] = []
-    for index in range(start, end + 1):
-        row = cells[index]
-        # Status alone is not a task — skip hollow leftovers inside a block.
-        if not _row_has_real_content(row, headers):
+    index = 0
+    while index < len(dates):
+        bounds = _date_block_bounds(dates[index:], target)
+        if bounds is None:
+            # Continue searching after non-matching blocks and blank rows.
+            index += 1
             continue
-        rows.append((index + 2, row))
+        start, end = bounds
+        end += index
+        for row_index in range(start + index, end + 1):
+            row = cells[row_index]
+            if _row_has_real_content(row, headers):
+                rows.append((row_index + 2, row))
+        index = end + 1
     return rows
 
 

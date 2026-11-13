@@ -10,7 +10,7 @@ export async function POST(request: Request) {
   try {
     const response = await fetch(new URL("/api/download", backend.replace(/\/$/, "")), {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Automation-Secret": secret },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": request.headers.get("Idempotency-Key") ?? "", "X-Automation-Secret": secret },
       body: text,
       cache: "no-store",
       signal: AbortSignal.timeout(30000),

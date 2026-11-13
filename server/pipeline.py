@@ -155,12 +155,16 @@ async def _process_row(
     row_id = row["row_id"]
     replace = bool(row.get("replace"))
 
-    # Skip rows that already have a Drive link in Post Link — unless the
-    # caller explicitly asked to re-download and replace the delivered file.
-    existing_link = (row.get("post_link") or row.get("drive_url") or "").strip()
-    if existing_link and not replace:
-        store.set_row_state(job_id, row_id, "done", drive_url=existing_link)
-        log.info("row %s already has a Post Link; skipping download", row_id)
+    # A saved Drive URL is a completed upload checkpoint, including replace
+    # jobs. Retry only the Sheet write that failed; do not download/upload twice.
+    existing_link = (row.get("drive_url") or "").strip()
+    if existing_link:
+        if row.get("sheet_row") is None:
+            raise AutomationError("SHEET_ROW_NOT_FOUND", "The Sheet row number for this item is unknown.")
+        store.set_row_state(job_id, row_id, "updating_sheet")
+        await asyncio.to_thread(sheets.set_drive_link, token, int(row["sheet_row"]), existing_link, sheet_id)
+        await asyncio.to_thread(sheets.set_status, token, int(row["sheet_row"]), "Done", sheet_id)
+        store.set_row_state(job_id, row_id, "done", drive_url=existing_link, error="", error_code="")
         return
 
     store.set_row_state(job_id, row_id, "downloading")
@@ -209,6 +213,7 @@ async def _process_row(
         "updating_sheet",
         drive_url=upload.web_view_link,
         warnings=upload.warnings,
+        folder_path=upload.folder_path,
     )
 
     if row.get("sheet_row") is None:
