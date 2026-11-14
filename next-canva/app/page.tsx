@@ -863,8 +863,8 @@ function Desk() {
       </section>
       {(activeToken && sheetId.trim()) && (
         <>
-          <div className="rule" />
-          <section className="card" style={{ marginTop: "1rem" }}>
+          <div className="rule existing-tasks-rule" />
+          <section className="card existing-tasks-card" style={{ marginTop: "1rem" }}>
             <div className="card-heading records-heading">
               <div>
                 <p className="section-label">Existing tasks</p>

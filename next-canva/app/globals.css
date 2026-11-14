@@ -5,7 +5,7 @@
 body { margin: 0; background: var(--paper); color: var(--ink); font-family: Arial, Helvetica, sans-serif; }
 button, input, select, textarea { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
-.shell { max-width: 1240px; margin: 0 auto; padding: 30px 34px 24px; }
+.shell { max-width: 1240px; margin: 0 auto; padding: 30px 34px 24px; display: flex; flex-direction: column; }
 .masthead { display: flex; justify-content: space-between; align-items: flex-start; gap: 32px; }
 .eyebrow, .section-label, .step-mark, .count, .status-pill, footer { font-size: 10px; letter-spacing: .15em; text-transform: uppercase; font-weight: 700; }
 .eyebrow, .section-label { color: var(--green); margin: 0 0 8px; }
@@ -114,4 +114,9 @@ small { font-size: 12px; line-height: 1.5; }
 .entry-fields label { font-size: 11px; }
 h1 { letter-spacing: -.04em; }
 .workspace { margin-top: 24px; }
+.working-day { order: 1; }
+.workspace { order: 2; }
+.existing-tasks-rule { order: 3; }
+.existing-tasks-card { order: 4; }
+.shell > footer { order: 5; }
 @media(max-width:800px) { .calendar-controls { flex-wrap: wrap; } .calendar-controls input { flex-basis: 100%; } }
